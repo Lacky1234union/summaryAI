@@ -4,15 +4,26 @@ version = "0.1.0"
 description = "Саммаризатор лекций, семинаров, встреч и созвонов: локальный STT на CPU + LLM"
 requires-python = ">=3.12,<3.15"
 
-# Полный список зависимостей — задача #2. Здесь только то, что установлено замером в #1:
-# версия Python и откуда брать torch.
+# Зависимости добавляются этапом, а не все сразу: на этом канале каждый лишний пакет —
+# минуты ожидания, а неиспользуемая зависимость всё равно протухнет до своего этапа.
+# Сейчас — то, что нужно этапам 0–1. LLM-провайдер (#15) и веб (#23) приедут со своими задачами.
 dependencies = [
-    # STT: CTranslate2-рантайм с int8 на CPU. Замерено: колёса для 3.14 есть, откатов версий нет.
+    # CLI
+    "typer>=0.15",
+    # Конфиг и контракты (#3, #4)
+    "pydantic>=2.10",
+    "pydantic-settings>=2.15",
+    # Логи
+    "loguru>=0.7",
+    # STT: CTranslate2-рантайм, int8 на CPU (#11). Замерено в #1: колёса под 3.14 есть.
     "faster-whisper>=1.2.1",
-    # VAD. Пакет silero-vad требует torch БЕЗУСЛОВНО (extra onnx-cpu добавляет onnxruntime,
-    # но torch не убирает) — поэтому torch в зависимостях, а не опцией. См. DECISIONS.md.
+    # VAD (#10). Пакет silero-vad требует torch БЕЗУСЛОВНО — extra onnx-cpu добавляет
+    # onnxruntime, но torch не убирает (замерено в #1, см. DECISIONS.md).
     "torch>=2.14",
 ]
+
+[project.scripts]
+summuraze = "summuraze.cli:app"
 
 [dependency-groups]
 dev = [
@@ -22,8 +33,8 @@ dev = [
 ]
 
 # torch с PyPI по умолчанию тянет 29 пакетов, из них 15 — nvidia-* (CUDA 13): на машине без
-# NVIDIA это несколько гигабайт мёртвого груза. Индекс CPU даёт torch==2.14.0+cpu и 10 пакетов.
-# Замерено 2026-09-23 (issue #1), подробности — docs/DECISIONS.md.
+# NVIDIA это гигабайты мёртвого груза. Индекс CPU даёт torch==2.14.0+cpu и 10 пакетов.
+# Замерено 2026-09-23 (#1), подробности — docs/DECISIONS.md.
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
@@ -39,14 +50,24 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["summuraze"]
 
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: требует моделей или сети — не гоняется в обычном прогоне",
+    "eval: метрики качества (WER, RTF), нужны фикстуры с reference-транскриптами",
+]
+addopts = "-m 'not slow and not eval'"
 
 [build-system]
 requires = ["hatchling"]

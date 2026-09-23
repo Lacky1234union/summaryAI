@@ -11,7 +11,14 @@ summuraze run lecture.mp4 --profile lecture          # по API, ~$0.01 за д�
 summuraze run lecture.mp4 --profile lecture --local  # локальная модель, ничего не уходит наружу
 ```
 
-Статус: **проектирование.** Кода пока нет — есть план.
+Статус: **этап 0** — каркас. Конвейер ещё не собран, но гейт зелёный.
+
+```bash
+uv sync      # поставить зависимости
+make help    # что вообще можно запустить
+make lint    # ruff + mypy
+make test    # быстрые тесты
+```
 
 - [`docs/PLAN.md`](docs/PLAN.md) — этапы и приёмка
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — конвейер и контракты
