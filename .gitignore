@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Инструменты
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Секреты
+.env
+.env.local
+
+# Артефакты конвейера: транскрипты, саммари, нормализованное аудио.
+# Ключуются по хешу входа — в истории им делать нечего.
+data/
+artifacts/
+*.sqlite
+*.sqlite-journal
+
+# Веса моделей
+models/
+*.bin
+*.gguf
+
+# Медиа. Записи лекций и созвонов в git не кладём: размер и приватность.
+# Reference-транскрипты к фикстурам — кладём, они текстовые и они эталон.
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.mkv
+*.webm
+*.ogg
+*.opus
+*.flac
