@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -118,11 +119,22 @@ def test_module_has_no_vendor_imports() -> None:
 
     Если faster_whisper или anthropic просочатся сюда, конвейер окажется прибит к вендору,
     а CLI начнёт грузить рантайм STT на --help.
+
+    Разбираем AST, а не ищем подстроку: имена вендоров законно встречаются в докстрингах —
+    именно там написано, чего импортировать нельзя. Поиск по тексту ловил бы документацию.
     """
     source = (Path(__file__).parents[2] / "summuraze" / "types.py").read_text(encoding="utf-8")
-    forbidden = ("faster_whisper", "ctranslate2", "torch", "anthropic", "openai", "pyannote")
-    found = [name for name in forbidden if name in source]
-    assert not found, f"вендорские импорты в контрактах: {found}"
+    forbidden = {"faster_whisper", "ctranslate2", "torch", "anthropic", "openai", "pyannote"}
+
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+
+    leaked = sorted(imported & forbidden)
+    assert not leaked, f"вендорские импорты в контрактах: {leaked}"
 
 
 def test_speaker_turn_keeps_speaker() -> None:
