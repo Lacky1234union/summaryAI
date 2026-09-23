@@ -14,6 +14,27 @@
 
 ---
 
+## ⚡ Первое действие в каждой сессии
+
+```bash
+set -a; . ./.env 2>/dev/null; set +a
+```
+
+`GITEA_TOKEN` — секрет, **в чат не печатать**. Токен и `GITEA_URL` те же, что в vobot.
+
+**Задачи — в Gitea Issues, не в файлах:** https://gitea.24studbank.ru/HSE/SummaryAI/issues
+Этапы плана = вехи (milestones), одна задача = один issue. Нет issue — нет кода.
+curl-шпаргалка по API (создание issue, комментарии, PR, кириллица в JSON) —
+[`../vobot/docs/dev/GITEA_API.md`](../vobot/docs/dev/GITEA_API.md).
+
+> **Кириллица в JSON:** `curl -d '{...}'` ломает кодировку. Только через `json.dumps` / `JSON.stringify`
+> + `--data-binary @-` + `Content-Type: application/json; charset=utf-8`.
+
+Лог выполнения дописывается в тело issue секцией `### YYYY-MM-DD`; архитектурные решения —
+в `docs/DECISIONS.md`.
+
+---
+
 ## Карта документации
 
 | Файл | О чём |
