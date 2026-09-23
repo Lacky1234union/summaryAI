@@ -1,0 +1,56 @@
+[project]
+name = "summuraze"
+version = "0.1.0"
+description = "Саммаризатор лекций, семинаров, встреч и созвонов: локальный STT на CPU + LLM"
+requires-python = ">=3.12,<3.15"
+
+# Полный список зависимостей — задача #2. Здесь только то, что установлено замером в #1:
+# версия Python и откуда брать torch.
+dependencies = [
+    # STT: CTranslate2-рантайм с int8 на CPU. Замерено: колёса для 3.14 есть, откатов версий нет.
+    "faster-whisper>=1.2.1",
+    # VAD. Пакет silero-vad требует torch БЕЗУСЛОВНО (extra onnx-cpu добавляет onnxruntime,
+    # но torch не убирает) — поэтому torch в зависимостях, а не опцией. См. DECISIONS.md.
+    "torch>=2.14",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.14",
+    "mypy>=1.18",
+]
+
+# torch с PyPI по умолчанию тянет 29 пакетов, из них 15 — nvidia-* (CUDA 13): на машине без
+# NVIDIA это несколько гигабайт мёртвого груза. Индекс CPU даёт torch==2.14.0+cpu и 10 пакетов.
+# Замерено 2026-09-23 (issue #1), подробности — docs/DECISIONS.md.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+# Линтер и mypy целятся в 3.12, хотя разрабатываем на 3.14: так код остаётся совместим
+# с фолбэком и не обрастает синтаксисом, из-за которого откат стал бы невозможен.
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["summuraze"]
