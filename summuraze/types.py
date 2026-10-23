@@ -36,6 +36,28 @@ class Interval(BaseModel):
         return self.end - self.start
 
 
+class AudioInfo(BaseModel):
+    """Результат ингеста (#5): нормализованный wav и то, что известно об исходнике.
+
+    `duration` — длительность именно wav, посчитанная по сэмплам: от неё дальше считаются все
+    таймкоды. Длительность из контейнера (`source_duration`) бывает неточной у VBR mp3 и
+    у видео с рассинхроном дорожек, поэтому хранится отдельно, для диагностики.
+
+    `audio_streams` — сколько аудиодорожек было в исходнике. Раздельные дорожки (микрофон и
+    собеседники) дают атрибуцию спикеров бесплатно, без diarization-модели (этап 6).
+    """
+
+    source: Path
+    wav: Path
+    duration: float = Field(ge=0)
+    source_duration: float | None = None
+    source_codec: str
+    source_channels: int = Field(ge=1)
+    source_sample_rate: int = Field(gt=0)
+    audio_streams: int = Field(ge=1)
+    has_video: bool = False
+
+
 class Word(Interval):
     """Слово с таймкодом.
 
