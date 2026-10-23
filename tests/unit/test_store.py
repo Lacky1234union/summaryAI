@@ -213,5 +213,33 @@ class TestDatabase:
         path = tmp_path / "db.sqlite"
         Database(path).close()
         Database(path).close()
-        version = sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0]
-        assert version == 1
+        conn = sqlite3.connect(path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        finally:
+            conn.close()
+
+
+def test_cli_gc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from typer.testing import CliRunner
+
+    from summuraze.cli import app
+    from summuraze.config import get_settings
+
+    monkeypatch.setenv("SUMMURAZE_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    store = ArtifactStore(get_settings().paths.artifacts_dir)
+    path, _ = store.get_or_build(_key(), lambda out: (out / "a.wav").write_bytes(b"0" * 2**20))
+    old = time.time() - 40 * 86400
+    os.utime(path / MANIFEST, (old, old))
+
+    runner = CliRunner()
+    dry = runner.invoke(app, ["gc", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert "будет удалено: 1" in dry.output
+    assert path.exists()
+
+    real = runner.invoke(app, ["gc"])
+    assert "удалено: 1" in real.output
+    assert not path.exists()
+    get_settings.cache_clear()

@@ -55,6 +55,7 @@ curl-шпаргалка по API (создание issue, комментарии
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | ADR: что решили и почему (дописываем сверху) |
 | [`docs/QUESTIONS.md`](docs/QUESTIONS.md) | Открытые вопросы по этапам + бэклог идей |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Замеры моделей на **этом** железе: RTF, WER, RSS |
+| [`docs/dev/CI_RUNNER.md`](docs/dev/CI_RUNNER.md) | CI: раннер act_runner, защита веток, разбор падений |
 
 ---
 
@@ -87,7 +88,7 @@ curl-шпаргалка по API (создание issue, комментарии
 7. Модель (STT или LLM) выбирается **замером на этом железе**; результат — в `BENCHMARKS.md`
    с датой и версиями. Чужие бенчмарки на 4090 здесь не значат ничего.
 8. ID моделей провайдера сверять в момент реализации: `deepseek-chat` retired 24.07.2026.
-9. `make lint` + `make test` — зелёные перед коммитом.
+9. `make lint` + `make test` — зелёные перед коммитом; `make ci` = то, что гоняет CI (с покрытием ≥ 85 %).
 
 ---
 

@@ -1,0 +1,59 @@
+# Гейт проекта (#35): то же, что `make ci` локально — lint + быстрые тесты с покрытием.
+#
+# slow/eval (настоящие модели, WER, RTF) здесь не гоняются: качать гигабайты весов и мерить
+# скорость на чужом облачном CPU бессмысленно — модель выбирается замером на ЭТОМ ноутбуке
+# (guardrail #7), результаты живут в docs/BENCHMARKS.md.
+#
+# Раннер — self-hosted act_runner, инструкция: docs/dev/CI_RUNNER.md.
+
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  gate:
+    # ⚠️ Имя джоба входит в имя статуса для branch protection («CI / lint-test …»). Не менять
+    # без правки правил защиты веток.
+    name: lint-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # Кэш uv живёт в другом томе, чем .venv: без copy uv ругается на хардлинки между ФС.
+      UV_LINK_MODE: copy
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Без ffmpeg тесты ингеста молча уходят в skip, и зелёный CI ничего о них не говорит.
+      # Шаг падает, если ffmpeg так и не появился.
+      - name: ffmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            SUDO=$(command -v sudo || true)
+            $SUDO apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq --no-install-recommends ffmpeg
+          fi
+          ffmpeg -version | head -1
+
+      # Python берётся из .python-version (3.14) — uv скачает сам, системный в образе не важен.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # --locked: если uv.lock разошёлся с pyproject.toml, это ошибка PR, а не повод
+      # молча перерезолвить зависимости на сервере.
+      - name: Зависимости
+        run: uv sync --locked
+
+      - name: Lint (ruff, mypy)
+        run: make lint
+
+      # -rs: пропущенные тесты видны в логе — skip не должен прятаться за зелёной галкой.
+      - name: Тесты и покрытие (порог 85 %)
+        run: uv run pytest -rs --cov --cov-report=term
