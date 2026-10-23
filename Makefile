@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install lint fmt test test-all bench-asr run clean
+.PHONY: help install lint fmt test cov ci test-all bench-asr run clean
 
 help:                 ## Показать эти команды
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -22,6 +22,11 @@ fmt:                  ## Отформатировать и починить, ч�
 
 test:                 ## Быстрые тесты (без slow и eval)
 	uv run pytest
+
+cov:                  ## Быстрые тесты с покрытием; ниже порога (85 %) — красный
+	uv run pytest --cov --cov-report=term
+
+ci: lint cov          ## То же, что гоняет CI: lint + тесты с покрытием
 
 test-all:             ## Все тесты, включая slow и eval (нужны модели и фикстуры)
 	uv run pytest -m ""

@@ -30,6 +30,8 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.14",
     "mypy>=1.18",
+    # Покрытие (#35): порог в [tool.coverage.report], гоняется `make cov` и в CI.
+    "pytest-cov>=6.0",
 ]
 
 # torch с PyPI по умолчанию тянет 29 пакетов, из них 15 — nvidia-* (CUDA 13): на машине без
@@ -68,6 +70,19 @@ markers = [
     "eval: метрики качества (WER, RTF), нужны фикстуры с reference-транскриптами",
 ]
 addopts = "-m 'not slow and not eval'"
+
+# Порог 85, а не текущие ~96: адаптеры ASR и LLM будут проверяться в основном slow-тестами
+# с настоящими моделями, а их в быстром прогоне нет. Высокий порог тогда толкал бы к мокам,
+# которые проверяют сами себя (#35, ADR в DECISIONS.md).
+[tool.coverage.run]
+source = ["summuraze"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+exclude_also = ["if __name__ == .__main__.:", "\\.\\.\\."]
 
 [build-system]
 requires = ["hatchling"]
