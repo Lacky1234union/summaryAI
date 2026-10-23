@@ -71,5 +71,24 @@ def ingest(
     )
 
 
+@app.command()
+def gc(
+    days: Annotated[
+        float, typer.Option(help="Удалить артефакты, не использованные столько дней")
+    ] = 30,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Только показать, сколько освободится")
+    ] = False,
+) -> None:
+    """Почистить кэш артефактов: wav и транскрипты быстро съедают десятки ГБ."""
+    from summuraze.config import get_settings
+    from summuraze.store.artifacts import ArtifactStore
+
+    store = ArtifactStore(get_settings().paths.artifacts_dir)
+    result = store.gc(days, dry_run=dry_run)
+    verb = "будет удалено" if dry_run else "удалено"
+    typer.echo(f"{verb}: {result.removed} артефактов, {result.freed_bytes / 2**20:.1f} МБ")
+
+
 if __name__ == "__main__":
     app()
