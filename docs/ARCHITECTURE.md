@@ -136,7 +136,7 @@ Summuraze/
 ├── summuraze/
 │   ├── config.py                pydantic-settings: единая точка валидации env
 │   ├── types.py                 контракты (см. выше)
-│   ├── cli.py                   typer: transcribe / summarize / run / record / bench
+│   ├── cli.py                   typer: transcribe / summarize / run / record / bench; без аргументов — меню (этап 2.5)
 │   ├── pipeline/
 │   │   ├── stages.py            описание стадий и их зависимостей
 │   │   ├── orchestrator.py      прогон с кэшем, докладывает прогресс
@@ -144,7 +144,7 @@ Summuraze/
 │   ├── audio/
 │   │   ├── ingest.py            ffmpeg-нормализация, метаданные, извлечение из видео
 │   │   ├── vad.py               Silero VAD → интервалы речи
-│   │   └── record.py            захват через PipeWire (2 трека)
+│   │   └── record.py            захват через PipeWire: микрофон + звук системы, 2 дорожки (этап 2.5)
 │   ├── asr/
 │   │   ├── base.py              Protocol + фабрика
 │   │   ├── faster_whisper.py    дефолт
