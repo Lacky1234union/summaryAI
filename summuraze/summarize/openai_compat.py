@@ -1,4 +1,4 @@
-"""Единый LLM-адаптер для OpenAI-совместимых серверов: DeepSeek, OpenRouter, llama.cpp.
+"""Единый LLM-адаптер для OpenAI-совместимых серверов: OpenRouter (дефолт), DeepSeek, llama.cpp.
 
 Переключение API ↔ локально — значения `base_url` и `model` в конфиге, а не ветка в коде
 (guardrail #2). Протокол простой — один POST `/chat/completions`, поэтому без SDK: `httpx`
@@ -13,6 +13,9 @@
 
 Промпт профиля нельзя ставить в `system`: он стоит перед транскриптом, и смена профиля обнулила
 бы кэш на всём транскрипте. Работает ли кэш — видно по `cached_input` в `summuraze log`.
+
+OpenRouter сам считает, сколько списал за запрос (`usage.cost`), — эта цифра точнее таблицы
+`pricing.py` и идёт в лог как есть. Прокси (`proxy_url`) — для хостов в РФ: OpenRouter их режет.
 
 Refs #15
 """
@@ -36,6 +39,7 @@ BASE_SYSTEM = (
     "Ты работаешь с транскриптами записей лекций, встреч и созвонов. Транскрипт размечен "
     "таймкодами [ЧЧ:ММ:СС]. Отвечай по-русски, опирайся только на транскрипт."
 )
+OPENROUTER_HOST = "openrouter.ai"
 TRANSCRIPT_HEADER = "Транскрипт записи:\n\n"
 INSTRUCTIONS_HEADER = "\n\n---\n\n"
 
@@ -60,11 +64,15 @@ class OpenAICompatLLM:
         self.context_window = cfg.context
         self._base_url = cfg.base_url.rstrip("/")
         self._local = cfg.is_local
+        self._openrouter = OPENROUTER_HOST in self._base_url
         headers = {"Content-Type": "application/json"}
         key = cfg.api_key.get_secret_value()
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        self._client = client or httpx.Client(timeout=TIMEOUT)
+        if self._openrouter:
+            headers["X-Title"] = "Summuraze"
+        proxy = cfg.proxy_url.get_secret_value() if cfg.proxy_url else None
+        self._client = client or httpx.Client(timeout=TIMEOUT, proxy=proxy)
         self._headers = headers
 
     def complete(
@@ -85,6 +93,8 @@ class OpenAICompatLLM:
             "temperature": 0.3,
             "stream": False,
         }
+        if self._openrouter:
+            body["usage"] = {"include": True}  # вернуть списанную сумму в ответе
         at = datetime.now(UTC)
         data = self._post(body)
         try:
@@ -97,12 +107,16 @@ class OpenAICompatLLM:
                 "ответ модели обрезан лимитом в {} токенов — конец документа может отсутствовать",
                 max_tokens,
             )
-        usage = _usage(data.get("usage") or {})
+        raw_usage = data.get("usage") or {}
+        usage = _usage(raw_usage)
+        billed = raw_usage.get("cost")
         return LLMResult(
             text=text.strip(),
             model=data.get("model") or self.model,
             usage=usage,
-            cost_usd=cost_usd(self._base_url, self.model, usage, at, local=self._local),
+            cost_usd=float(billed)
+            if billed is not None
+            else cost_usd(self._base_url, self.model, usage, at, local=self._local),
         )
 
     def _post(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -156,6 +170,7 @@ def _explain(response: httpx.Response) -> str:
         402: "на счёте провайдера кончились деньги",
         404: "нет такого адреса или модели — проверь SUMMURAZE_LLM_BASE_URL и SUMMURAZE_LLM_MODEL",
         429: "провайдер просит притормозить (лимит запросов)",
+        403: "доступ запрещён — OpenRouter режет IP из РФ, задай SUMMURAZE_LLM_PROXY_URL",
     }
     hint = hints.get(response.status_code, "ошибка провайдера")
     return f"{response.status_code}: {hint} ({detail})"

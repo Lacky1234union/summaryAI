@@ -16,8 +16,11 @@ from summuraze.config import ASRSettings, get_settings
 @pytest.fixture(autouse=True)
 def _isolated_data_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     for key in list(os.environ):
-        if key.startswith("SUMMURAZE_"):
+        if key.startswith(("SUMMURAZE_", "OPENROUTER_", "LLM_")):
             monkeypatch.delenv(key, raising=False)
+    # .env читается из текущего каталога — в tmp его нет. Иначе тесты увидели бы настоящий ключ
+    # OpenRouter из .env проекта и могли бы пойти с ним в сеть.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SUMMURAZE_DATA_DIR", str(tmp_path / "data"))
     # Тесты не качают и не грузят Whisper: настоящая модель — только в тестах с маркой `model`.
     monkeypatch.setenv("SUMMURAZE_ASR_PROVIDER", "echo")

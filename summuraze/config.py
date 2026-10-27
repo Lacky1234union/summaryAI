@@ -21,7 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Хосты, которые считаем локальными при проверке --local-only.
@@ -127,24 +127,49 @@ class LLMSettings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_prefix="SUMMURAZE_LLM_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_prefix="SUMMURAZE_LLM_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,  # LLMSettings(api_key=...) в коде и тестах — мимо алиасов окружения
     )
 
     # openai-compat — единый адаптер для DeepSeek и llama.cpp (#15); echo — заглушка без сети,
     # для тестов и проверки конвейера. Это не третий путь «локально/API».
     provider: Literal["echo", "openai-compat"] = "openai-compat"
-    base_url: str = "https://api.deepseek.com/v1"
+    # Дефолт — OpenRouter, как в остальных проектах (meditron, vobot, tgit): один ключ на всё.
+    # DeepSeek V4.1-Flash там же, что и на api.deepseek.com (сверено 2026-10-27).
+    base_url: str = "https://openrouter.ai/api/v1"
     # Алиас deepseek-chat retired 24.07.2026 — не использовать.
-    model: str = "deepseek-flash"
-    api_key: SecretStr = SecretStr("")
+    model: str = "deepseek/deepseek-v4.1-flash"
+    # OPENROUTER_API_KEY — то же имя, что в meditron / vobot / tgit: ключ не дублируется по .env.
+    api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("SUMMURAZE_LLM_API_KEY", "OPENROUTER_API_KEY"),
+    )
+    # OpenRouter режет IP из РФ на edge — с такого хоста нужен HTTP(S)/SOCKS5-прокси
+    # (http://user:pass@host:port, socks5://…). Пусто — напрямую. Имена — как в tgit и vobot.
+    proxy_url: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "SUMMURAZE_LLM_PROXY_URL", "LLM_PROXY_URL", "OPENROUTER_PROXY_URL"
+        ),
+    )
     # Контекст провайдера: от него считается порог single-pass против иерархии (#16).
-    # У deepseek-flash — 1M, у локальной 8B-модели на два порядка меньше.
+    # У DeepSeek V4.1-Flash — 1M, у локальной 8B-модели на два порядка меньше.
     context: int = Field(default=1_000_000, gt=0)
 
     @property
     def is_local(self) -> bool:
         # echo никуда не ходит — base_url для него не значит ничего.
         return self.provider == "echo" or any(host in self.base_url for host in _LOCAL_HOSTS)
+
+    @field_validator("proxy_url", mode="before")
+    @classmethod
+    def _blank_proxy_means_direct(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
 
 class Settings(BaseSettings):

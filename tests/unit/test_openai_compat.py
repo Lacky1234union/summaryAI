@@ -44,7 +44,11 @@ DEEPSEEK_REPLY = {
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
+DEEPSEEK = "https://api.deepseek.com/v1"
+
+
 def _llm(handler: Handler, **cfg: Any) -> OpenAICompatLLM:
+    cfg = {"base_url": DEEPSEEK, "model": "deepseek-flash", **cfg}
     settings = LLMSettings(provider="openai-compat", api_key=SecretStr("sk-test"), **cfg)
     return OpenAICompatLLM(settings, client=httpx.Client(transport=httpx.MockTransport(handler)))
 
@@ -248,7 +252,7 @@ class TestFactory:
 
     def test_openai_compat(self) -> None:
         llm = make_llm(LLMSettings(provider="openai-compat", api_key=SecretStr("sk")))
-        assert isinstance(llm, LLMProvider) and llm.model == "deepseek-flash"
+        assert isinstance(llm, LLMProvider) and llm.model == "deepseek/deepseek-v4.1-flash"
 
     def test_remote_without_key_refused(self) -> None:
         with pytest.raises(LLMNotConfigured, match="SUMMURAZE_LLM_API_KEY"):
@@ -286,3 +290,69 @@ def test_cli_explains_missing_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("SUMMURAZE_LLM_PROVIDER", "openai-compat")
     result = CliRunner().invoke(app, ["run", str(rec)])
     assert result.exit_code == 1 and "SUMMURAZE_LLM_API_KEY" in result.output
+
+
+class TestOpenRouter:
+    REPLY = {
+        "model": "deepseek/deepseek-v4.1-flash",
+        "choices": [{"message": {"content": "Конспект."}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 800},
+            "cost": 0.000123,
+        },
+    }
+
+    def _llm(self, handler: Handler) -> OpenAICompatLLM:
+        settings = LLMSettings(api_key=SecretStr("sk-or"))  # дефолты — OpenRouter
+        return OpenAICompatLLM(
+            settings, client=httpx.Client(transport=httpx.MockTransport(handler))
+        )
+
+    def test_defaults_and_billed_cost(self) -> None:
+        rec = Recorder(httpx.Response(200, json=self.REPLY))
+        result = _complete(self._llm(rec))
+        req = rec.requests[0]
+        assert str(req.url) == "https://openrouter.ai/api/v1/chat/completions"
+        assert req.headers["X-Title"] == "Summuraze"
+        body = rec.body()
+        assert body["model"] == "deepseek/deepseek-v4.1-flash"
+        assert body["usage"] == {"include": True}
+        assert result.cost_usd == 0.000123, "списанное OpenRouter точнее таблицы"
+        assert result.usage.cached_input == 800
+
+    def test_region_block_explained(self) -> None:
+        rec = Recorder(httpx.Response(403, json={"error": {"message": "Access denied"}}))
+        with pytest.raises(LLMError, match="403: .*SUMMURAZE_LLM_PROXY_URL"):
+            _complete(self._llm(rec))
+
+
+class TestEnv:
+    """Имена переменных — как в meditron / vobot / tgit: ключ и прокси не дублируются."""
+
+    def test_openrouter_key_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-shared")
+        assert LLMSettings().api_key.get_secret_value() == "sk-or-shared"
+        check_llm(LLMSettings())
+
+    def test_own_key_name_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SUMMURAZE_LLM_API_KEY", "sk-own")
+        assert LLMSettings().api_key.get_secret_value() == "sk-own"
+
+    @pytest.mark.parametrize(
+        "name", ["SUMMURAZE_LLM_PROXY_URL", "LLM_PROXY_URL", "OPENROUTER_PROXY_URL"]
+    )
+    def test_proxy_names(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+        monkeypatch.setenv(name, "socks5://user:pass@1.2.3.4:1080")
+        proxy = LLMSettings().proxy_url
+        assert proxy is not None and proxy.get_secret_value().startswith("socks5://")
+        OpenAICompatLLM(LLMSettings(api_key=SecretStr("k")))  # httpx[socks] на месте
+
+    def test_blank_proxy_is_direct(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SUMMURAZE_LLM_PROXY_URL", " ")
+        assert LLMSettings().proxy_url is None
+
+    def test_proxy_not_leaked_in_repr(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_PROXY_URL", "http://user:secret@1.2.3.4:8080")
+        assert "secret" not in repr(LLMSettings())

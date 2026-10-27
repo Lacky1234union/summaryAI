@@ -20,7 +20,8 @@ def check_llm(settings: LLMSettings) -> None:
     remote = settings.provider == "openai-compat" and not settings.is_local
     if remote and not settings.api_key.get_secret_value():
         raise LLMNotConfigured(
-            f"для {settings.base_url} нужен ключ: задай SUMMURAZE_LLM_API_KEY в .env. "
+            f"для {settings.base_url} нужен ключ: задай OPENROUTER_API_KEY "
+            "(или SUMMURAZE_LLM_API_KEY) в .env. "
             "Без ключа — локальный сервер (SUMMURAZE_LLM_BASE_URL=http://127.0.0.1:8080/v1) "
             "или заглушка SUMMURAZE_LLM_PROVIDER=echo"
         )

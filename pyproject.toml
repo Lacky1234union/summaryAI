@@ -19,8 +19,9 @@ dependencies = [
     # Он же даёт VAD (#10): Silero v6 в ONNX лежит в его составе, torch для этого не нужен
     # (ADR 2026-10-27). torch вернётся вместе с pyannote.audio на этапе 5.
     "faster-whisper>=1.2.1",
-    # LLM (#15): OpenAI-совместимый протокол — один POST, SDK не нужен.
-    "httpx>=0.28",
+    # LLM (#15): OpenAI-совместимый протокол — один POST, SDK не нужен. [socks] — прокси
+    # socks5:// для OpenRouter с хостов в РФ.
+    "httpx[socks]>=0.28",
 ]
 
 [project.scripts]
