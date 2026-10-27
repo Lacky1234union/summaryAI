@@ -13,6 +13,11 @@
 Сегмент Whisper, слова которого попали в разные куски склейки, режется по стыку: иначе в
 транскрипте была бы «фраза» через минуту тишины исходника, и таймкод вёл бы не туда.
 
+Термины (#13) уходят в `hotwords`, а не в `initial_prompt`: `initial_prompt` действует только
+на первое окно, дальше его вытесняет распознанный текст — на термины после первых 30 секунд
+он не влияет вовсе (замер в BENCHMARKS.md). `hotwords` подставляется в каждое окно, но длиннее
+`HOTWORDS_MAX_TOKENS` ломает распознавание — лишние термины отрезаются с предупреждением.
+
 Refs #11
 """
 
@@ -23,12 +28,18 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from loguru import logger
+
 from summuraze.asr.timeline import SpeechTimeline
 from summuraze.audio.wav import SAMPLE_RATE, read_pcm
 from summuraze.types import Interval, Segment, Transcript, Word
 
 if TYPE_CHECKING:
     from summuraze.config import ASRSettings
+
+# Замер на large-v3-turbo: 54 токена (10 терминов) — термины вытянуты, текст цел; 84 — уже теряются
+# слова; 114 и больше — терминов ноль, в тексте появляются непроизнесённые слова из подсказки.
+HOTWORDS_MAX_TOKENS = 60
 
 _CPU_SYS = Path("/sys/devices/system/cpu")
 
@@ -93,8 +104,7 @@ class FasterWhisperASR:
             language=language,
             word_timestamps=True,
             vad_filter=False,
-            # Словарь терминов — подсказка модели; как его собирать и проверять — #13.
-            initial_prompt=", ".join(terms) if terms else None,
+            hotwords=self._hotwords(terms or []),
         )
         segments = [s for seg in raw for s in _to_source(seg, timeline)]
         return Transcript(
@@ -104,6 +114,31 @@ class FasterWhisperASR:
             asr_model=self.model_name,
             segments=segments,
         )
+
+    def _hotwords(self, terms: list[str]) -> str | None:
+        tokenizer = self._model.hf_tokenizer
+        hotwords, dropped = _fit_hotwords(terms, lambda text: len(tokenizer.encode(text).ids))
+        if dropped:
+            logger.warning(
+                "в подсказку Whisper не влезли {} терминов из {} (лимит {} токенов): {}. "
+                "Поставь важные выше в словаре; для остальных работают замены "
+                "«слышится -> пишется»",
+                len(dropped),
+                len(terms),
+                HOTWORDS_MAX_TOKENS,
+                ", ".join(dropped),
+            )
+        return hotwords
+
+
+def _fit_hotwords(terms: list[str], count_tokens: Any) -> tuple[str | None, list[str]]:
+    """Взять термины по порядку, пока подсказка влезает в бюджет; вернуть её и отрезанное."""
+    taken: list[str] = []
+    for i, term in enumerate(terms):
+        if count_tokens(" " + ", ".join([*taken, term])) > HOTWORDS_MAX_TOKENS:
+            return (", ".join(taken) or None), terms[i:]
+        taken.append(term)
+    return (", ".join(taken) or None), []
 
 
 def _to_source(seg: Any, timeline: SpeechTimeline) -> Iterable[Segment]:

@@ -150,6 +150,7 @@ Summuraze/
 │   │   ├── base.py              Protocol + фабрика
 │   │   ├── faster_whisper.py    дефолт: склейка речи → Whisper → таймкоды слов в исходник
 │   │   ├── timeline.py          пересчёт времени склейки в секунды исходника (без вендора)
+│   │   ├── terms.py             словарь терминов: подсказка Whisper + замены поверх кэша
 │   │   ├── whisper_cpp.py       альтернатива (в т.ч. Vulkan на iGPU)
 │   │   └── repetition.py        детектор выдумок Whisper: помечает, не удаляет (поверх кэша)
 │   ├── speakers/

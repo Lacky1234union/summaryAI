@@ -56,6 +56,10 @@ class FakeModel:
     def __init__(self, name: str, **kwargs: Any) -> None:
         FakeModel.created.append({"name": name, **kwargs})
         self.calls: list[dict[str, Any]] = []
+        # Токенизатор-фейк: 10 токенов на слово — в бюджет 60 влезает ровно 6 слов.
+        self.hf_tokenizer = SimpleNamespace(
+            encode=lambda text: SimpleNamespace(ids=[0] * 10 * len(text.split()))
+        )
 
     def transcribe(self, audio: Any, **kwargs: Any) -> tuple[list[SimpleNamespace], Any]:
         self.calls.append({"samples": len(audio), **kwargs})
@@ -152,7 +156,7 @@ class TestAdapter:
         asr = _asr()
         t = asr.transcribe(_silence_wav(tmp_path / "a.wav", 50), terms=["Фурье", "FFT"])
         assert asr._model.calls[0]["samples"] == 50 * SR
-        assert asr._model.calls[0]["initial_prompt"] == "Фурье, FFT"
+        assert asr._model.calls[0]["hotwords"] == "Фурье, FFT"
         assert t.segments[0].start == 30.0
         assert t.segments[0].words[0].prob == 1.0
 
@@ -194,3 +198,39 @@ def test_real_model_keeps_word_on_its_source_second(
 def _first_words_after(t: Any, starts: list[float]) -> list[Any]:
     words = [w for s in t.segments for w in s.words]
     return [min((w for w in words if w.start >= s - 1), key=lambda w: w.start) for s in starts]
+
+
+def test_hotwords_cut_to_budget_with_warning(fake: type[FakeModel], tmp_path: Path) -> None:
+    from loguru import logger
+
+    warnings: list[str] = []
+    sink = logger.add(warnings.append, level="WARNING", format="{message}")
+    try:
+        asr = _asr()
+        terms = ["Фурье", "Котельников", "окно Хэмминга", "Найквист", "Лаплас", "Тьюки"]
+        asr.transcribe(_silence_wav(tmp_path / "a.wav", 5), terms=terms)
+    finally:
+        logger.remove(sink)
+    # 6 слов × 10 = 60 токенов — ровно лимит; седьмое слово уже не влезает.
+    assert asr._model.calls[0]["hotwords"] == "Фурье, Котельников, окно Хэмминга, Найквист, Лаплас"
+    assert len(warnings) == 1 and "1 терминов из 6" in warnings[0] and "Тьюки" in warnings[0]
+
+
+def test_no_terms_no_hotwords(fake: type[FakeModel], tmp_path: Path) -> None:
+    asr = _asr()
+    asr.transcribe(_silence_wav(tmp_path / "a.wav", 5))
+    assert asr._model.calls[0]["hotwords"] is None
+
+
+@pytest.mark.slow
+def test_real_model_hotwords_fix_term(
+    compose: Callable[..., list[tuple[float, float]]], tmp_path: Path, cached_whisper: ASRSettings
+) -> None:
+    """espeak-«Фурье» без подсказки Whisper слышит как «фурии»; с подсказкой — пишет правильно."""
+    compose(tmp_path / "rec.m4a", [("silence", 1), ("speech",)])
+    wav = ingest(tmp_path / "rec.m4a", tmp_path / "rec.wav").wav
+    asr = FasterWhisperASR(cached_whisper)
+    plain = asr.transcribe(wav, language="ru").text
+    hinted = asr.transcribe(wav, language="ru", terms=["Фурье"]).text
+    assert "Фурье" not in plain, plain
+    assert "Фурье" in hinted, hinted
