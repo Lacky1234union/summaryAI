@@ -36,6 +36,7 @@ StreamOpt = Annotated[
 
 _STAGE_TITLES = {
     "ingest": "ингест",
+    "vad": "поиск речи",
     "asr": "распознавание",
     "summarize": "саммари",
     "render": "заметка",
@@ -83,6 +84,10 @@ def transcribe(source: SourceArg, stream: StreamOpt = None) -> None:
     assert result.transcript is not None
     t = result.transcript
     typer.echo(f"{len(t.segments)} сегментов, {t.duration:.1f} с, модель {t.asr_model}")
+    if result.speech is not None:
+        speech = sum(i.duration for i in result.speech)
+        share = speech / t.duration if t.duration else 0.0
+        typer.echo(f"  речь: {speech:.1f} с ({share:.0%}), интервалов: {len(result.speech)}")
 
 
 @app.command()
@@ -147,13 +152,20 @@ def _run(
     source: Path, *, until: StageName, stream: int | None, profile: str = "lecture"
 ) -> RunResult:
     from summuraze.audio.ingest import IngestError
+    from summuraze.audio.vad import NoSpeechError
     from summuraze.config import get_settings
     from summuraze.pipeline.orchestrator import Pipeline
 
     try:
         with Pipeline(get_settings(), on_event=_print_event) as pipeline:
             return pipeline.run(source, until=until, stream=stream, profile=profile)
-    except (IngestError, NotImplementedError, ValueError, FileNotFoundError) as e:
+    except (
+        IngestError,
+        NoSpeechError,
+        NotImplementedError,
+        ValueError,
+        FileNotFoundError,
+    ) as e:
         typer.echo(f"Ошибка: {e}", err=True)
         raise typer.Exit(1) from e
 

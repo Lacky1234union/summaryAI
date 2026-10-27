@@ -88,6 +88,26 @@ class ASRSettings(BaseSettings):
         return v
 
 
+class VADSettings(BaseSettings):
+    """Разметка речи перед ASR (#10). Пороги — Silero; дефолты подобраны под лекцию:
+    паузу на вдох внутри фразы не режем, щелчки короче 250 мс речью не считаем."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_VAD_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # false — ASR получает запись целиком. Для диагностики «VAD съел речь», не для работы.
+    enabled: bool = True
+    # Вероятность речи, выше которой окно 32 мс считается речью.
+    threshold: float = Field(default=0.5, gt=0, lt=1)
+    # Пауза короче этой не разрывает интервал.
+    min_silence_ms: int = Field(default=1000, ge=0)
+    # Интервал короче этого выбрасывается (щелчки, кашель).
+    min_speech_ms: int = Field(default=250, ge=0)
+    # Запас с каждой стороны интервала, чтобы не откусить первый и последний слог.
+    speech_pad_ms: int = Field(default=400, ge=0)
+
+
 class LLMSettings(BaseSettings):
     """Провайдер саммаризации.
 
@@ -123,6 +143,7 @@ class Settings(BaseSettings):
     )
 
     paths: PathsSettings = Field(default_factory=PathsSettings)
+    vad: VADSettings = Field(default_factory=VADSettings)
     asr: ASRSettings = Field(default_factory=ASRSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from summuraze.asr.echo import EchoASR
 from summuraze.audio.ingest import IngestError
+from summuraze.audio.vad import NoSpeechError
 from summuraze.cli import app
 from summuraze.config import ASRSettings, LLMSettings, Settings, get_settings
 from summuraze.pipeline.orchestrator import Pipeline, StageEvent
@@ -22,21 +23,21 @@ from summuraze.types import ASRProvider, LLMProvider, Segment, Transcript
 
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="нужен ffmpeg")
 
-DURATION = 65.0
+# Речь двумя кусками с паузой: секунды известны, по ним проверяется смещение таймкодов.
+LAYOUT = [("silence", 10), ("speech",), ("silence", 10), ("speech",), ("silence", 5)]
 
 
 @pytest.fixture(scope="module")
-def lecture(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def spans(
+    tmp_path_factory: pytest.TempPathFactory, compose: Callable[..., list[tuple[float, float]]]
+) -> tuple[Path, list[tuple[float, float]]]:
     path = tmp_path_factory.mktemp("media") / "lecture.m4a"
-    subprocess.run(
-        [
-            *("ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y"),
-            *("-f", "lavfi", "-i", f"sine=frequency=300:duration={DURATION}"),
-            *("-c:a", "aac", str(path)),
-        ],
-        check=True,
-    )
-    return path
+    return path, compose(path, LAYOUT)
+
+
+@pytest.fixture
+def lecture(spans: tuple[Path, list[tuple[float, float]]]) -> Path:
+    return spans[0]
 
 
 class Counting:
@@ -70,8 +71,61 @@ def test_full_run_produces_note(lecture: Path) -> None:
     assert result.note is not None and result.note.is_file()
     text = result.note.read_text(encoding="utf-8")
     assert "Эхо-саммари" in text
-    assert "`00:01:00` эхо-сегмент 3" in text, "таймкоды должны идти от начала записи"
-    assert result.audio.duration == pytest.approx(DURATION, abs=0.1)
+    assert result.transcript is not None
+    first = result.transcript.segments[0]
+    assert f"`{fmt_timecode(first.start)}` эхо-сегмент 1" in text
+
+
+def test_asr_sees_only_speech_with_source_timecodes(
+    spans: tuple[Path, list[tuple[float, float]]],
+) -> None:
+    """Таймкоды после VAD — от начала исходника: вторая речь на ~25-й секунде, а не на 6-й."""
+    lecture, truth = spans
+    with _pipeline(Counting()) as p:
+        result = p.run(lecture, until="asr")
+    assert result.speech is not None and result.transcript is not None
+    segments = result.transcript.segments
+    assert [round(s.start) for s in segments] == [round(start) for start, _ in truth]
+    pause = (truth[0][1] + 1, truth[1][0] - 1)
+    assert not any(s.start < pause[1] and pause[0] < s.end for s in segments)
+
+
+def test_vad_disabled_gives_asr_whole_file(lecture: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUMMURAZE_VAD_ENABLED", "false")
+    events: list[StageEvent] = []
+    with _pipeline(Counting(), events) as p:
+        result = p.run(lecture, until="asr")
+    assert result.speech is None and result.transcript is not None
+    assert result.transcript.segments[0].start == 0
+    assert {e.stage for e in events} == {"ingest", "asr"}
+    assert {e.total for e in events} == {2}
+
+
+def test_vad_param_change_reruns_vad_and_asr_but_not_ingest(
+    lecture: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counting = Counting()
+    with _pipeline(counting) as p:
+        p.run(lecture, until="asr")
+    monkeypatch.setenv("SUMMURAZE_VAD_MIN_SILENCE_MS", "20000")
+    with _pipeline(counting) as p:
+        result = p.run(lecture, until="asr")
+    assert counting.asr == 2
+    assert result.cached == {"ingest": True, "vad": False, "asr": False}
+    assert result.speech is not None and len(result.speech) == 1
+
+
+def test_no_speech_stops_before_asr(
+    tmp_path: Path, compose: Callable[..., list[tuple[float, float]]]
+) -> None:
+    music = tmp_path / "music.m4a"
+    compose(music, [("tone", 5)])
+    counting = Counting()
+    with _pipeline(counting) as p, pytest.raises(NoSpeechError, match="не найдено речи"):
+        p.run(music)
+    assert counting.asr == 0
+    result = CliRunner().invoke(app, ["run", str(music)])
+    assert result.exit_code == 1 and "не найдено речи" in result.output
 
 
 def test_second_run_takes_everything_from_cache(lecture: Path) -> None:
@@ -83,10 +137,17 @@ def test_second_run_takes_everything_from_cache(lecture: Path) -> None:
         second = p.run(lecture)
 
     assert (counting.asr, counting.llm) == (1, 1), "повторный прогон не должен создавать модели"
-    assert second.cached == {"ingest": True, "asr": True, "summarize": True, "render": False}
+    assert second.cached == {
+        "ingest": True,
+        "vad": True,
+        "asr": True,
+        "summarize": True,
+        "render": False,
+    }
     finished = {e.stage: e.status for e in events if e.status != "start"}
     assert finished == {
         "ingest": "cached",
+        "vad": "cached",
         "asr": "cached",
         "summarize": "cached",
         "render": "done",
@@ -104,7 +165,8 @@ def test_asr_param_change_reruns_asr_but_not_ingest(
         result = p.run(lecture)
     assert counting.asr == 2
     assert counting.llm == 2, "новый транскрипт — новое саммари: ключи идут цепочкой"
-    assert result.cached is not None and result.cached["ingest"] is True
+    assert result.cached is not None
+    assert (result.cached["ingest"], result.cached["vad"]) == (True, True)
 
 
 def test_threads_do_not_invalidate_transcript(
@@ -196,11 +258,13 @@ class TestCLI:
         assert first.exit_code == 0, first.output
         assert "Заметка:" in first.output
         second = runner.invoke(app, ["run", str(lecture)])
-        assert second.output.count("из кэша") == 3, second.output
+        assert second.output.count("из кэша") == 4, second.output
 
     def test_transcribe_then_log(self, lecture: Path) -> None:
         runner = CliRunner()
         assert runner.invoke(app, ["transcribe", str(lecture)]).exit_code == 0
+        out = runner.invoke(app, ["transcribe", str(lecture)]).output
+        assert "речь:" in out and "интервалов: 2" in out, out
         out = runner.invoke(app, ["log"]).output
         assert "lecture.m4a" in out and "done" in out
 

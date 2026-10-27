@@ -40,3 +40,7 @@ models/
 *.ogg
 *.opus
 *.flac
+
+# Исключение: синтетическая речь из espeak-ng для тестов VAD (#10) — ничья не запись, 11 КБ.
+# Как сгенерирована — tests/fixtures/synthetic/README.md.
+!tests/fixtures/synthetic/*.opus

@@ -143,7 +143,7 @@ Summuraze/
 │   │   └── cache.py             ключи, инвалидация, GC старых артефактов
 │   ├── audio/
 │   │   ├── ingest.py            ffmpeg-нормализация, метаданные, извлечение из видео
-│   │   ├── vad.py               Silero VAD → интервалы речи
+│   │   ├── vad.py               Silero VAD (ONNX из faster-whisper) → интервалы речи
 │   │   └── record.py            захват через PipeWire: микрофон + звук системы, 2 дорожки (этап 2.5)
 │   ├── asr/
 │   │   ├── base.py              Protocol + фабрика
