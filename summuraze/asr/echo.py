@@ -2,6 +2,9 @@
 
 Нужна этапу 0, чтобы конвейер проходил целиком до появления faster-whisper (#11), и тестам —
 сквозной прогон без моделей. Таймкоды настоящие (от длительности wav), текст — нет.
+
+Контракт `speech` соблюдает честно: режет только интервалы речи от VAD и не выходит за них, —
+так на заглушке проверяется, что таймкоды идут от начала исходника, а не от склейки речи.
 """
 
 from __future__ import annotations
@@ -28,12 +31,16 @@ class EchoASR:
         with wave.open(str(audio), "rb") as w:
             duration = w.getnframes() / w.getframerate()
 
+        if speech is None:
+            speech = [Interval(start=0, end=duration)]
         segments: list[Segment] = []
-        start = 0.0
-        while start < duration:
-            end = min(start + CHUNK_SECONDS, duration)
-            segments.append(Segment(start=start, end=end, text=f"эхо-сегмент {len(segments) + 1}"))
-            start = end
+        for interval in speech:
+            start = interval.start
+            while start < interval.end:
+                end = min(start + CHUNK_SECONDS, interval.end)
+                text = f"эхо-сегмент {len(segments) + 1}"
+                segments.append(Segment(start=start, end=end, text=text))
+                start = end
         return Transcript(
             source=audio,
             duration=duration,

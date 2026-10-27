@@ -1,7 +1,7 @@
-"""Прогон конвейера: ingest → asr → summarize → render, каждая стадия через кэш.
+"""Прогон конвейера: ingest → vad → asr → summarize → render, каждая стадия через кэш.
 
-Последовательность явная, а не «движок DAG»: стадий четыре, и прочитать их сверху вниз проще,
-чем разбирать граф. VAD (#10) встанет между ingest и asr сюда же.
+Последовательность явная, а не «движок DAG»: стадий пять, и прочитать их сверху вниз проще,
+чем разбирать граф.
 
 Провайдеры создаются **внутри** сборки стадии, то есть только при промахе кэша. Два следствия:
 повторный прогон не грузит модель Whisper даже в память, и модель ASR перестаёт существовать
@@ -10,7 +10,7 @@
 Рендер не кэшируется: это дешёвая запись заметки, и она должна происходить при каждом прогоне —
 заметку могли удалить или переместить.
 
-Refs #7
+Refs #7, #10
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from summuraze.asr.base import make_asr
 from summuraze.audio.ingest import IngestError
+from summuraze.audio.vad import NoSpeechError
 from summuraze.config import ASRSettings, LLMSettings, Settings
 from summuraze.pipeline import stages
 from summuraze.render.markdown import note_path, render_note
@@ -31,10 +32,10 @@ from summuraze.store.artifacts import ArtifactKey, ArtifactStore
 from summuraze.store.db import Database
 from summuraze.summarize.base import make_llm
 from summuraze.summarize.profiles import get_profile
-from summuraze.types import ASRProvider, AudioInfo, LLMProvider, LLMResult, Transcript
+from summuraze.types import ASRProvider, AudioInfo, Interval, LLMProvider, LLMResult, Transcript
 
-StageName = Literal["ingest", "asr", "summarize", "render"]
-STAGES: tuple[StageName, ...] = ("ingest", "asr", "summarize", "render")
+StageName = Literal["ingest", "vad", "asr", "summarize", "render"]
+STAGES: tuple[StageName, ...] = ("ingest", "vad", "asr", "summarize", "render")
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,8 @@ class StageEvent:
 class RunResult:
     run_id: int
     audio: AudioInfo
+    # None — VAD выключен, ASR получил запись целиком.
+    speech: list[Interval] | None = None
     transcript: Transcript | None = None
     summary: LLMResult | None = None
     note: Path | None = None
@@ -92,14 +95,15 @@ class Pipeline:
         prof = get_profile(profile)  # неизвестный профиль — до часа транскрибации, а не после
         if not source.is_file():
             raise IngestError(f"файл не найден: {source}")
-        total = STAGES.index(until) + 1
+        active = [s for s in STAGES if s != "vad" or self.settings.vad.enabled]
+        total = active.index(until) + 1
         recording_id, source_hash = self.db.register_source(source)
         run_id = self.db.start_run(recording_id)
         cached: dict[str, bool] = {}
         llm_fresh: LLMResult | None = None
 
         def stage(name: StageName, key: ArtifactKey, build: Callable[[Path], None]) -> Path:
-            index = STAGES.index(name) + 1
+            index = active.index(name) + 1
             self._on_event(StageEvent(name, index, total, "start"))
             started = time.monotonic()
             path, hit = self.store.get_or_build(key, build)
@@ -127,18 +131,42 @@ class Pipeline:
                 self.db.finish_run(run_id, "done")
                 return result
 
+            speech: list[Interval] | None = None
+            asr_input = ingest_key.digest
+            vad_cfg = self.settings.vad
+            if vad_cfg.enabled:
+                vad_key = ArtifactKey(
+                    "vad",
+                    stages.VAD_VERSION,
+                    (ingest_key.digest,),
+                    vad_cfg.model_dump(exclude={"enabled"}),
+                )
+                speech = stages.load_vad(
+                    stage("vad", vad_key, lambda out: stages.build_vad(out, audio, vad_cfg))
+                )
+                result.speech = speech
+                asr_input = vad_key.digest
+                if until == "vad":
+                    self.db.finish_run(run_id, "done")
+                    return result
+                if not speech:
+                    raise NoSpeechError(
+                        "в записи не найдено речи — только тишина или музыка. Если речь там "
+                        "есть, понизь SUMMURAZE_VAD_THRESHOLD или выключи VAD"
+                    )
+
             asr_cfg = self.settings.asr
             asr_key = ArtifactKey(
                 "asr",
                 stages.ASR_VERSION,
-                (ingest_key.digest,),
+                (asr_input,),
                 _asr_params(asr_cfg),
             )
 
             def build_asr(out: Path) -> None:
                 asr = self._asr_factory(asr_cfg)  # вне try: упавшая фабрика — не повод для del
                 try:
-                    stages.build_asr(out, asr, audio, language=asr_cfg.language)
+                    stages.build_asr(out, asr, audio, language=asr_cfg.language, speech=speech)
                 finally:
                     del asr
                     gc.collect()
@@ -172,7 +200,7 @@ class Pipeline:
             result.summary = summary
 
             if until == "render":
-                index = STAGES.index("render") + 1
+                index = active.index("render") + 1
                 self._on_event(StageEvent("render", index, total, "start"))
                 started = time.monotonic()
                 result.note = render_note(

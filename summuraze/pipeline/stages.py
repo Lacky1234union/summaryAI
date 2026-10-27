@@ -14,17 +14,31 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pydantic import TypeAdapter
+
 from summuraze.audio.ingest import ingest
+from summuraze.audio.vad import detect_speech
+from summuraze.config import VADSettings
 from summuraze.render.markdown import fmt_timecode
 from summuraze.summarize.profiles import Profile
-from summuraze.types import ASRProvider, AudioInfo, LLMProvider, LLMResult, Transcript
+from summuraze.types import (
+    ASRProvider,
+    AudioInfo,
+    Interval,
+    LLMProvider,
+    LLMResult,
+    Transcript,
+)
 
 INGEST_VERSION = 1
-ASR_VERSION = 1
+VAD_VERSION = 1
+# 2: ASR получает интервалы речи от VAD (#10).
+ASR_VERSION = 2
 SUMMARY_VERSION = 1
 
 _AUDIO = "audio.wav"
 _AUDIO_INFO = "audio.json"
+_SPEECH = "speech.json"
 _TRANSCRIPT = "transcript.json"
 _SUMMARY = "summary.json"
 
@@ -41,8 +55,27 @@ def load_ingest(artifact: Path, source: Path) -> AudioInfo:
     return info.model_copy(update={"wav": artifact / info.wav, "source": source})
 
 
-def build_asr(out: Path, asr: ASRProvider, audio: AudioInfo, *, language: str | None) -> None:
-    transcript = asr.transcribe(audio.wav, language=language)
+_Intervals = TypeAdapter(list[Interval])
+
+
+def build_vad(out: Path, audio: AudioInfo, cfg: VADSettings) -> None:
+    speech = detect_speech(audio.wav, cfg)
+    (out / _SPEECH).write_bytes(_Intervals.dump_json(speech, indent=2))
+
+
+def load_vad(artifact: Path) -> list[Interval]:
+    return _Intervals.validate_json((artifact / _SPEECH).read_bytes())
+
+
+def build_asr(
+    out: Path,
+    asr: ASRProvider,
+    audio: AudioInfo,
+    *,
+    language: str | None,
+    speech: list[Interval] | None,
+) -> None:
+    transcript = asr.transcribe(audio.wav, language=language, speech=speech)
     (out / _TRANSCRIPT).write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
 
 
