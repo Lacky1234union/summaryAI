@@ -15,7 +15,6 @@ Refs #7, #10
 
 from __future__ import annotations
 
-import gc
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -27,6 +26,7 @@ from summuraze.audio.ingest import IngestError
 from summuraze.audio.vad import NoSpeechError
 from summuraze.config import ASRSettings, LLMSettings, Settings
 from summuraze.pipeline import stages
+from summuraze.pipeline.memory import release_memory
 from summuraze.render.markdown import note_path, render_note
 from summuraze.store.artifacts import ArtifactKey, ArtifactStore
 from summuraze.store.db import Database
@@ -169,7 +169,7 @@ class Pipeline:
                     stages.build_asr(out, asr, audio, language=asr_cfg.language, speech=speech)
                 finally:
                     del asr
-                    gc.collect()
+                    release_memory()
 
             transcript = stages.load_transcript(stage("asr", asr_key, build_asr), source)
             result.transcript = transcript

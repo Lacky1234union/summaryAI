@@ -140,6 +140,7 @@ Summuraze/
 │   ├── pipeline/
 │   │   ├── stages.py            описание стадий и их зависимостей
 │   │   ├── orchestrator.py      прогон с кэшем, докладывает прогресс
+│   │   ├── memory.py            выгрузка модели: gc + malloc_trim, память — обратно системе
 │   │   └── cache.py             ключи, инвалидация, GC старых артефактов
 │   ├── audio/
 │   │   ├── ingest.py            ffmpeg-нормализация, метаданные, извлечение из видео
@@ -147,7 +148,8 @@ Summuraze/
 │   │   └── record.py            захват через PipeWire: микрофон + звук системы, 2 дорожки (этап 2.5)
 │   ├── asr/
 │   │   ├── base.py              Protocol + фабрика
-│   │   ├── faster_whisper.py    дефолт
+│   │   ├── faster_whisper.py    дефолт: склейка речи → Whisper → таймкоды слов в исходник
+│   │   ├── timeline.py          пересчёт времени склейки в секунды исходника (без вендора)
 │   │   ├── whisper_cpp.py       альтернатива (в т.ч. Vulkan на iGPU)
 │   │   └── repetition.py        детектор циклов/галлюцинаций Whisper
 │   ├── speakers/
