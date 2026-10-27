@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from summuraze.config import get_settings
+from summuraze.config import ASRSettings, get_settings
 
 
 @pytest.fixture(autouse=True)
@@ -92,3 +92,16 @@ def compose() -> Composer:
         return spans
 
     return build
+
+
+@pytest.fixture
+def cached_whisper() -> ASRSettings:
+    """Настройки настоящего Whisper для тестов `slow`; без модели в кэше HuggingFace — skip."""
+    from faster_whisper.utils import download_model
+
+    cfg = ASRSettings(provider="faster-whisper")
+    try:
+        download_model(cfg.model, local_files_only=True)
+    except Exception:
+        pytest.skip(f"модели {cfg.model} нет в кэше HuggingFace")
+    return cfg

@@ -162,26 +162,16 @@ class TestAdapter:
         assert t.segments == [] and asr._model.calls == []
 
 
-def _cached_model(name: str) -> None:
-    from faster_whisper.utils import download_model
-
-    try:
-        download_model(name, local_files_only=True)
-    except Exception:
-        pytest.skip(f"модели {name} нет в кэше HuggingFace")
-
-
 @pytest.mark.slow
 def test_real_model_keeps_word_on_its_source_second(
-    compose: Callable[..., list[tuple[float, float]]], tmp_path: Path
+    compose: Callable[..., list[tuple[float, float]]], tmp_path: Path, cached_whisper: ASRSettings
 ) -> None:
     """Сквозная проверка ловушки #10/#11 на настоящем Whisper: речь на 37-й секунде исходника
     после VAD и склейки распознаётся на 37-й секунде, а не на нулевой."""
     from summuraze.audio.vad import detect_speech
     from summuraze.config import VADSettings
 
-    cfg = ASRSettings(provider="faster-whisper")
-    _cached_model(cfg.model)
+    cfg = cached_whisper
     spans = compose(
         tmp_path / "rec.m4a", [("silence", 37), ("speech",), ("silence", 20), ("speech2",)]
     )

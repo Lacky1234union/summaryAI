@@ -92,6 +92,9 @@ def transcribe(source: SourceArg, stream: StreamOpt = None, lang: LangOpt = None
     typer.echo(
         f"{len(t.segments)} сегментов, {t.duration:.1f} с, язык {t.language}, модель {t.asr_model}"
     )
+    suspects = sum(s.suspect for s in t.segments)
+    if suspects:
+        typer.echo(f"  сомнительных сегментов: {suspects} (помечены ⚠️ в заметке)")
     if result.speech is not None:
         speech = sum(i.duration for i in result.speech)
         share = speech / t.duration if t.duration else 0.0

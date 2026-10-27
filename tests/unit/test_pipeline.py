@@ -9,17 +9,18 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from summuraze.asr import repetition
 from summuraze.asr.echo import EchoASR
 from summuraze.audio.ingest import IngestError
 from summuraze.audio.vad import NoSpeechError
 from summuraze.cli import app
 from summuraze.config import ASRSettings, LLMSettings, Settings, get_settings
 from summuraze.pipeline.orchestrator import Pipeline, StageEvent
-from summuraze.pipeline.stages import transcript_prefix
+from summuraze.pipeline.stages import SUSPECT_RULE, transcript_prefix
 from summuraze.render.markdown import fmt_timecode
 from summuraze.store.db import Database
 from summuraze.summarize.echo import EchoLLM
-from summuraze.types import ASRProvider, LLMProvider, Segment, Transcript
+from summuraze.types import ASRProvider, LLMProvider, LLMResult, Segment, Transcript
 
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="нужен ffmpeg")
 
@@ -292,3 +293,63 @@ class TestCLI:
         assert "язык en" in out, out
         out = runner.invoke(app, ["transcribe", str(lecture), "--lang", "auto"]).output
         assert "распознавание… из кэша" not in out, "другой язык — другой ключ кэша ASR"
+
+
+class Hallucinating(Counting):
+    """ASR, который вставляет шаблонную выдумку Whisper; LLM запоминает, что ей отправили."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[dict[str, object]] = []
+
+    def make_asr(self, cfg: ASRSettings) -> ASRProvider:
+        self.asr += 1
+        echo = EchoASR()
+
+        class Stub:
+            name = "stub"
+
+            def transcribe(self, audio: Path, **kw: object) -> Transcript:
+                t = echo.transcribe(audio, **kw)  # type: ignore[arg-type]
+                fake = Segment(start=t.duration - 2, end=t.duration, text="Продолжение следует...")
+                return t.model_copy(update={"segments": [*t.segments, fake]})
+
+        return Stub()
+
+    def make_llm(self, cfg: LLMSettings) -> LLMProvider:
+        self.llm += 1
+        llm, sent = EchoLLM(), self.sent
+
+        class Recording:
+            name = llm.name
+            model = llm.model
+
+            def complete(self, **kw: object) -> LLMResult:
+                sent.append(kw)
+                return llm.complete(**kw)  # type: ignore[arg-type]
+
+        return Recording()  # type: ignore[return-value]
+
+
+def test_suspect_segment_reaches_prompt_and_note(lecture: Path) -> None:
+    h = Hallucinating()
+    with _pipeline(h) as p:
+        result = p.run(lecture)
+    assert result.note is not None
+    [call] = h.sent
+    assert "[?] Продолжение следует" in str(call["prefix"])
+    assert SUSPECT_RULE in str(call["system"])
+    assert "⚠️ *Продолжение следует...* — шаблонная фраза" in result.note.read_text("utf-8")
+
+
+def test_detector_change_redoes_summary_but_not_asr(
+    lecture: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counting = Counting()
+    with _pipeline(counting) as p:
+        p.run(lecture)
+    monkeypatch.setattr(repetition, "VERSION", repetition.VERSION + 1)
+    with _pipeline(counting) as p:
+        result = p.run(lecture)
+    assert (counting.asr, counting.llm) == (1, 2)
+    assert result.cached is not None and result.cached["asr"] is True
