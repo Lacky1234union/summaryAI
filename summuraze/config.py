@@ -34,6 +34,20 @@ class PathsSettings(BaseSettings):
     )
 
     data_dir: Path = Path("./data")
+    # Куда кладутся готовые заметки — папка внутри Obsidian-хранилища (ADR 2026-10-26).
+    # Пусто = `<data_dir>/notes`, чтобы прогон работал и без Obsidian.
+    output_dir: Path | None = None
+
+    @field_validator("output_dir", mode="before")
+    @classmethod
+    def _blank_output_means_default(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @property
+    def notes_dir(self) -> Path:
+        return self.output_dir or self.data_dir / "notes"
 
     @property
     def artifacts_dir(self) -> Path:
@@ -52,6 +66,9 @@ class ASRSettings(BaseSettings):
         env_prefix="SUMMURAZE_ASR_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
+    # echo — заглушка этапа 0 (#7): сегменты без распознавания, чтобы конвейер шёл целиком.
+    # Дефолт переключится на faster-whisper вместе с самим адаптером (#11).
+    provider: Literal["echo", "faster-whisper"] = "echo"
     # Дефолт — предположение до замера. Настоящий выбор делает бенчмарк на этом железе (#9)
     # по правилу «лучшее качество при RTF <= 0.5».
     model: str = "large-v3-turbo"
@@ -83,6 +100,9 @@ class LLMSettings(BaseSettings):
         env_prefix="SUMMURAZE_LLM_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
+    # openai-compat — единый адаптер для DeepSeek и llama.cpp (#15); echo — заглушка этапа 0.
+    # Это не третий путь «локально/API»: echo никуда не ходит и нужен только пока нет #15.
+    provider: Literal["echo", "openai-compat"] = "echo"
     base_url: str = "https://api.deepseek.com/v1"
     # Алиас deepseek-chat retired 24.07.2026 — не использовать.
     model: str = "deepseek-flash"
@@ -93,7 +113,8 @@ class LLMSettings(BaseSettings):
 
     @property
     def is_local(self) -> bool:
-        return any(host in self.base_url for host in _LOCAL_HOSTS)
+        # echo никуда не ходит — base_url для него не значит ничего.
+        return self.provider == "echo" or any(host in self.base_url for host in _LOCAL_HOSTS)
 
 
 class Settings(BaseSettings):

@@ -75,8 +75,15 @@ class TestLLM:
     def test_is_local_detection(
         self, monkeypatch: pytest.MonkeyPatch, url: str, expected: bool
     ) -> None:
+        monkeypatch.setenv("SUMMURAZE_LLM_PROVIDER", "openai-compat")
         monkeypatch.setenv("SUMMURAZE_LLM_BASE_URL", url)
         assert LLMSettings().is_local is expected
+
+    def test_echo_is_local_whatever_the_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Заглушка никуда не ходит: --local-only не должен её запрещать."""
+        monkeypatch.setenv("SUMMURAZE_LLM_PROVIDER", "echo")
+        monkeypatch.setenv("SUMMURAZE_LLM_BASE_URL", "https://api.deepseek.com/v1")
+        assert LLMSettings().is_local is True
 
     def test_zero_context_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Нулевой контекст сломал бы расчёт порога single-pass против иерархии (#16)."""
@@ -91,6 +98,7 @@ class TestLocalOnly:
     ) -> None:
         """Противоречие должно всплыть при старте, а не после часа транскрибации."""
         monkeypatch.setenv("SUMMURAZE_LOCAL_ONLY", "true")
+        monkeypatch.setenv("SUMMURAZE_LLM_PROVIDER", "openai-compat")
         monkeypatch.setenv("SUMMURAZE_LLM_BASE_URL", "https://api.deepseek.com/v1")
         with pytest.raises(ValidationError, match="смотрит наружу"):
             Settings()
