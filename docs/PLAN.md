@@ -93,7 +93,7 @@ reference, точность терминов и имён, пиковая RSS.
 OpenAI-совместимому протоколу. Значит один адаптер, а переключение — это `base_url` + `model`
 (см. ARCHITECTURE.md, таблица режимов).
 
-- `summarize/openai_compat.py` — единый адаптер. Дефолт: `deepseek-flash`, 1M контекста,
+- `summarize/openai_compat.py` — единый адаптер. Дефолт: OpenRouter + `deepseek/deepseek-v4.1-flash`, 1M контекста,
   **~$0.01 за двухчасовой документ**. `--local` переводит на llama.cpp server.
 - `budget.py`: реальный подсчёт токенов; порог перехода на иерархию — свойство провайдера
   в конфиге, не константа.
