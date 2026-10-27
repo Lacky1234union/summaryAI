@@ -78,6 +78,16 @@ class ASRSettings(BaseSettings):
     # 0 = по числу физических ядер: на 5700U 8 потоков дают RTF 0.43, дефолт CTranslate2 (4) —
     # 0.63. Гиперпотоки не помогают; точное число уточнит замер (#9).
     threads: int = Field(default=0, ge=0)
+    # Общий словарь терминов (#13) — можно заметкой в Obsidian. Словарь курса передаётся
+    # `--terms` и идёт первым: в подсказку Whisper влезает только ~10 терминов.
+    terms_file: Path | None = None
+
+    @field_validator("terms_file", mode="before")
+    @classmethod
+    def _blank_terms_means_none(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     @field_validator("language", mode="before")
     @classmethod

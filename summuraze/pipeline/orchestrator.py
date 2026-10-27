@@ -23,6 +23,7 @@ from typing import Any, Literal
 
 from summuraze.asr import repetition
 from summuraze.asr.base import make_asr
+from summuraze.asr.terms import apply_replacements, load_glossary
 from summuraze.audio.ingest import IngestError
 from summuraze.audio.vad import NoSpeechError
 from summuraze.config import ASRSettings, LLMSettings, Settings
@@ -92,8 +93,12 @@ class Pipeline:
         until: StageName = "render",
         stream: int | None = None,
         profile: str = "lecture",
+        terms: Path | None = None,
     ) -> RunResult:
-        prof = get_profile(profile)  # неизвестный профиль — до часа транскрибации, а не после
+        """`terms` — словарь курса (#13); он важнее общего `SUMMURAZE_ASR_TERMS_FILE`."""
+        # Битый профиль или словарь — до часа транскрибации, а не после.
+        prof = get_profile(profile)
+        glossary = load_glossary([terms, self.settings.asr.terms_file])
         if not source.is_file():
             raise IngestError(f"файл не найден: {source}")
         active = [s for s in STAGES if s != "vad" or self.settings.vad.enabled]
@@ -161,21 +166,31 @@ class Pipeline:
                 "asr",
                 stages.ASR_VERSION,
                 (asr_input,),
-                _asr_params(asr_cfg),
+                # Термины меняют распознавание; без словаря ключ прежний — старый кэш жив.
+                _asr_params(asr_cfg) | ({"terms": list(glossary.hint)} if glossary.hint else {}),
             )
 
             def build_asr(out: Path) -> None:
                 asr = self._asr_factory(asr_cfg)  # вне try: упавшая фабрика — не повод для del
                 try:
-                    stages.build_asr(out, asr, audio, language=asr_cfg.language, speech=speech)
+                    stages.build_asr(
+                        out,
+                        asr,
+                        audio,
+                        language=asr_cfg.language,
+                        speech=speech,
+                        terms=list(glossary.hint),
+                    )
                 finally:
                     del asr
                     release_memory()
 
             transcript = stages.load_transcript(stage("asr", asr_key, build_asr), source)
-            # Поверх кэша, а не внутри ASR: правка правил не стоит часа транскрибации (#12).
+            # Замены (#13) и детектор (#12) — поверх кэша, а не внутри ASR: правка карты замен
+            # или правил не стоит часа транскрибации. Замены первыми: детектор видит итоговый текст.
+            segments = apply_replacements(transcript.segments, glossary)
             transcript = transcript.model_copy(
-                update={"segments": repetition.flag_suspects(transcript.segments)}
+                update={"segments": repetition.flag_suspects(segments)}
             )
             result.transcript = transcript
             if until == "asr":
@@ -193,6 +208,7 @@ class Pipeline:
                     "profile": prof.name,
                     "profile_version": prof.version,
                     "suspects": repetition.VERSION,
+                    **({"replacements": glossary.replacements} if glossary.replacements else {}),
                 },
             )
 

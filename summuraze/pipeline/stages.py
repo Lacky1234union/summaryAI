@@ -75,8 +75,9 @@ def build_asr(
     *,
     language: str | None,
     speech: list[Interval] | None,
+    terms: list[str],
 ) -> None:
-    transcript = asr.transcribe(audio.wav, language=language, speech=speech)
+    transcript = asr.transcribe(audio.wav, language=language, speech=speech, terms=terms or None)
     (out / _TRANSCRIPT).write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
 
 

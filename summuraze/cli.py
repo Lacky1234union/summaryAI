@@ -33,6 +33,13 @@ StreamOpt = Annotated[
     int | None,
     typer.Option(help="Номер аудиодорожки с нуля; по умолчанию все сводятся в одну"),
 ]
+TermsOpt = Annotated[
+    Path | None,
+    typer.Option(
+        "--terms",
+        help="Словарь терминов курса: по строке на термин, «слышится -> пишется» — замена",
+    ),
+]
 LangOpt = Annotated[
     str | None,
     typer.Option(
@@ -52,6 +59,14 @@ _STAGE_TITLES = {
 @app.callback()
 def main() -> None:
     """Саммаризатор лекций, семинаров, встреч и созвонов."""
+    import sys
+
+    from loguru import logger
+
+    # Предупреждения — человеку в терминал, без отметок времени и имён модулей. С новой строки:
+    # они приходят посреди стадии, когда в строке уже стоит «[3/5] распознавание…».
+    logger.remove()
+    logger.add(sys.stderr, level="WARNING", format="\n<yellow>Внимание:</yellow> {message}")
 
 
 @app.command()
@@ -84,9 +99,11 @@ def ingest(
 
 
 @app.command()
-def transcribe(source: SourceArg, stream: StreamOpt = None, lang: LangOpt = None) -> None:
+def transcribe(
+    source: SourceArg, stream: StreamOpt = None, lang: LangOpt = None, terms: TermsOpt = None
+) -> None:
     """Расшифровать запись (без саммари)."""
-    result = _run(source, until="asr", stream=stream, lang=lang)
+    result = _run(source, until="asr", stream=stream, lang=lang, terms=terms)
     assert result.transcript is not None
     t = result.transcript
     typer.echo(
@@ -107,9 +124,10 @@ def run(
     profile: Annotated[str, typer.Option(help="Профиль документа")] = "lecture",
     stream: StreamOpt = None,
     lang: LangOpt = None,
+    terms: TermsOpt = None,
 ) -> None:
     """Запись → транскрипт → саммари → заметка."""
-    result = _run(source, until="render", stream=stream, profile=profile, lang=lang)
+    result = _run(source, until="render", stream=stream, profile=profile, lang=lang, terms=terms)
     typer.echo(f"Заметка: {result.note}")
 
 
@@ -167,6 +185,7 @@ def _run(
     stream: int | None,
     profile: str = "lecture",
     lang: str | None = None,
+    terms: Path | None = None,
 ) -> RunResult:
     from summuraze.audio.ingest import IngestError
     from summuraze.audio.vad import NoSpeechError
@@ -180,7 +199,7 @@ def _run(
         settings = settings.model_copy(update={"asr": asr})
     try:
         with Pipeline(settings, on_event=_print_event) as pipeline:
-            return pipeline.run(source, until=until, stream=stream, profile=profile)
+            return pipeline.run(source, until=until, stream=stream, profile=profile, terms=terms)
     except (
         IngestError,
         NoSpeechError,

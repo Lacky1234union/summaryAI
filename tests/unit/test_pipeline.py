@@ -353,3 +353,43 @@ def test_detector_change_redoes_summary_but_not_asr(
         result = p.run(lecture)
     assert (counting.asr, counting.llm) == (1, 2)
     assert result.cached is not None and result.cached["asr"] is True
+
+
+def test_glossary_terms_reach_asr_and_replacements_skip_it(lecture: Path, tmp_path: Path) -> None:
+    """Термины — в ключе ASR (меняют распознавание); замены — поверх кэша, ASR не трогают."""
+    seen: list[object] = []
+
+    class Spy(Counting):
+        def make_asr(self, cfg: ASRSettings) -> ASRProvider:
+            self.asr += 1
+            echo = EchoASR()
+
+            class Rec:
+                name = "spy"
+
+                def transcribe(self, audio: Path, **kw: object) -> Transcript:
+                    seen.append(kw["terms"])
+                    return echo.transcribe(audio, **kw)  # type: ignore[arg-type]
+
+            return Rec()
+
+    course = tmp_path / "course.txt"
+    course.write_text("Фурье\n", encoding="utf-8")
+    spy = Spy()
+    with _pipeline(spy) as p:
+        p.run(lecture, until="asr")
+        p.run(lecture, until="asr", terms=course)
+        course.write_text("Фурье\nэхо -> Echo\n", encoding="utf-8")
+        result = p.run(lecture, terms=course)
+    assert seen == [None, ["Фурье"], ["Фурье", "Echo"]], "термины — в ключе ASR"
+    assert result.transcript is not None
+    assert result.transcript.segments[0].text.startswith("Echo-сегмент")
+
+    # Поменялось только, как писать (термины те же) — ASR из кэша, саммари заново.
+    course.write_text("Фурье\nEcho\nэхо -> echo\n", encoding="utf-8")
+    with _pipeline(spy) as p:
+        again = p.run(lecture, terms=course)
+    assert len(seen) == 3, "правка замен не должна перезапускать распознавание"
+    assert again.cached is not None and again.cached["summarize"] is False
+    assert again.transcript is not None
+    assert again.transcript.segments[0].text.startswith("echo-сегмент")
