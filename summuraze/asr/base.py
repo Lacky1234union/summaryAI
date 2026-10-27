@@ -4,7 +4,7 @@
 Импорт адаптера — внутри фабрики: `faster_whisper` с его рантаймом грузится, только когда
 транскрибация действительно нужна, а не на каждый `summuraze --help` и не при попадании в кэш.
 
-Refs #7
+Refs #7, #11
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ def make_asr(settings: ASRSettings) -> ASRProvider:
         from summuraze.asr.echo import EchoASR
 
         return EchoASR()
-    raise NotImplementedError(
-        f"ASR-провайдер {settings.provider!r} ещё не реализован (#11). "
-        "Пока доступен только SUMMURAZE_ASR_PROVIDER=echo."
-    )
+    from summuraze.asr.faster_whisper import FasterWhisperASR
+
+    return FasterWhisperASR(settings)

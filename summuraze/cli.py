@@ -33,6 +33,12 @@ StreamOpt = Annotated[
     int | None,
     typer.Option(help="Номер аудиодорожки с нуля; по умолчанию все сводятся в одну"),
 ]
+LangOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--lang", help="Язык записи (ru, en…) или auto; по умолчанию SUMMURAZE_ASR_LANGUAGE"
+    ),
+]
 
 _STAGE_TITLES = {
     "ingest": "ингест",
@@ -78,12 +84,14 @@ def ingest(
 
 
 @app.command()
-def transcribe(source: SourceArg, stream: StreamOpt = None) -> None:
+def transcribe(source: SourceArg, stream: StreamOpt = None, lang: LangOpt = None) -> None:
     """Расшифровать запись (без саммари)."""
-    result = _run(source, until="asr", stream=stream)
+    result = _run(source, until="asr", stream=stream, lang=lang)
     assert result.transcript is not None
     t = result.transcript
-    typer.echo(f"{len(t.segments)} сегментов, {t.duration:.1f} с, модель {t.asr_model}")
+    typer.echo(
+        f"{len(t.segments)} сегментов, {t.duration:.1f} с, язык {t.language}, модель {t.asr_model}"
+    )
     if result.speech is not None:
         speech = sum(i.duration for i in result.speech)
         share = speech / t.duration if t.duration else 0.0
@@ -95,9 +103,10 @@ def run(
     source: SourceArg,
     profile: Annotated[str, typer.Option(help="Профиль документа")] = "lecture",
     stream: StreamOpt = None,
+    lang: LangOpt = None,
 ) -> None:
     """Запись → транскрипт → саммари → заметка."""
-    result = _run(source, until="render", stream=stream, profile=profile)
+    result = _run(source, until="render", stream=stream, profile=profile, lang=lang)
     typer.echo(f"Заметка: {result.note}")
 
 
@@ -149,15 +158,25 @@ def _local_time(iso_utc: str) -> str:
 
 
 def _run(
-    source: Path, *, until: StageName, stream: int | None, profile: str = "lecture"
+    source: Path,
+    *,
+    until: StageName,
+    stream: int | None,
+    profile: str = "lecture",
+    lang: str | None = None,
 ) -> RunResult:
     from summuraze.audio.ingest import IngestError
     from summuraze.audio.vad import NoSpeechError
     from summuraze.config import get_settings
     from summuraze.pipeline.orchestrator import Pipeline
 
+    settings = get_settings()
+    if lang is not None:
+        language = None if lang.strip().lower() in ("", "auto") else lang.strip().lower()
+        asr = settings.asr.model_copy(update={"language": language})
+        settings = settings.model_copy(update={"asr": asr})
     try:
-        with Pipeline(get_settings(), on_event=_print_event) as pipeline:
+        with Pipeline(settings, on_event=_print_event) as pipeline:
             return pipeline.run(source, until=until, stream=stream, profile=profile)
     except (
         IngestError,

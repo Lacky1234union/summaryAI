@@ -24,7 +24,7 @@ from summuraze.types import ASRProvider, LLMProvider, Segment, Transcript
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="нужен ffmpeg")
 
 # Речь двумя кусками с паузой: секунды известны, по ним проверяется смещение таймкодов.
-LAYOUT = [("silence", 10), ("speech",), ("silence", 10), ("speech",), ("silence", 5)]
+LAYOUT = [("silence", 10), ("speech",), ("silence", 10), ("speech2",), ("silence", 5)]
 
 
 @pytest.fixture(scope="module")
@@ -285,3 +285,10 @@ class TestCLI:
         result = CliRunner().invoke(app, ["run", str(lecture), "--profile", "nope"])
         assert result.exit_code == 1
         assert "неизвестный профиль" in result.output
+
+    def test_lang_flag_overrides_config(self, lecture: Path) -> None:
+        runner = CliRunner()
+        out = runner.invoke(app, ["transcribe", str(lecture), "--lang", "EN"]).output
+        assert "язык en" in out, out
+        out = runner.invoke(app, ["transcribe", str(lecture), "--lang", "auto"]).output
+        assert "распознавание… из кэша" not in out, "другой язык — другой ключ кэша ASR"

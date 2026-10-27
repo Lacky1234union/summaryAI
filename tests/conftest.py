@@ -19,15 +19,19 @@ def _isolated_data_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Itera
         if key.startswith("SUMMURAZE_"):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("SUMMURAZE_DATA_DIR", str(tmp_path / "data"))
+    # Тесты не качают и не грузят Whisper: настоящая модель — только в тестах с маркой `model`.
+    monkeypatch.setenv("SUMMURAZE_ASR_PROVIDER", "echo")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
 
 
-SPEECH_CLIP = Path(__file__).parent / "fixtures" / "synthetic" / "speech_ru.opus"
+_SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
+# Две разные фразы: одинаковый клип дважды Whisper склеивает в одну (принимает за повтор).
+SPEECH_CLIPS = {"speech": _SYNTHETIC / "speech_ru.opus", "speech2": _SYNTHETIC / "speech2_ru.opus"}
 
-# Кусок записи для `compose`: ("speech",) — клип речи; ("silence", сек); ("tone", сек) — синус,
-# «музыка», на которой Whisper галлюцинирует не хуже, чем на тишине.
+# Кусок записи для `compose`: ("speech",) / ("speech2",) — фраза; ("silence", сек);
+# ("tone", сек) — синус, «музыка», на которой Whisper галлюцинирует не хуже, чем на тишине.
 Part = tuple[str] | tuple[str, float]
 Composer = Callable[[Path, list[Part]], list[tuple[float, float]]]
 
@@ -41,17 +45,20 @@ def compose() -> Composer:
     """
     if shutil.which("ffmpeg") is None:
         pytest.skip("нужен ffmpeg")
-    clip = float(
-        subprocess.run(
-            [
-                *("ffprobe", "-v", "error", "-show_entries", "format=duration"),
-                *("-of", "csv=p=0", str(SPEECH_CLIP)),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-    )
+    clips = {
+        kind: float(
+            subprocess.run(
+                [
+                    *("ffprobe", "-v", "error", "-show_entries", "format=duration"),
+                    *("-of", "csv=p=0", str(path)),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        for kind, path in SPEECH_CLIPS.items()
+    }
 
     def build(path: Path, parts: list[Part]) -> list[tuple[float, float]]:
         inputs: list[str] = []
@@ -59,10 +66,10 @@ def compose() -> Composer:
         t = 0.0
         for part in parts:
             kind = part[0]
-            if kind == "speech":
-                inputs += ["-i", str(SPEECH_CLIP)]
-                spans.append((t, t + clip))
-                t += clip
+            if kind in clips:
+                inputs += ["-i", str(SPEECH_CLIPS[kind])]
+                spans.append((t, t + clips[kind]))
+                t += clips[kind]
                 continue
             seconds = part[1]  # type: ignore[misc]
             src = "anullsrc=r=16000:cl=mono" if kind == "silence" else "sine=f=440:r=16000"

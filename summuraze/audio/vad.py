@@ -21,16 +21,14 @@ Refs #10
 
 from __future__ import annotations
 
-import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from summuraze.audio.wav import SAMPLE_RATE, read_pcm
 from summuraze.types import Interval
 
 if TYPE_CHECKING:
     from summuraze.config import VADSettings
-
-SAMPLE_RATE = 16_000
 
 
 class NoSpeechError(RuntimeError):
@@ -39,17 +37,11 @@ class NoSpeechError(RuntimeError):
 
 def detect_speech(wav: Path, cfg: VADSettings) -> list[Interval]:
     """Найти интервалы речи в wav 16 kHz mono s16 (выход ингеста)."""
-    import numpy as np
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-    with wave.open(str(wav), "rb") as w:
-        if (w.getframerate(), w.getnchannels(), w.getsampwidth()) != (SAMPLE_RATE, 1, 2):
-            raise ValueError(f"VAD ждёт wav 16 kHz mono s16, а получил другой: {wav}")
-        frames = w.readframes(w.getnframes())
-    if not frames:
+    audio = read_pcm(wav)
+    if not len(audio):
         return []
-    audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-    del frames
 
     chunks = get_speech_timestamps(
         audio,

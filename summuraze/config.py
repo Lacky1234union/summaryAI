@@ -66,9 +66,8 @@ class ASRSettings(BaseSettings):
         env_prefix="SUMMURAZE_ASR_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # echo — заглушка этапа 0 (#7): сегменты без распознавания, чтобы конвейер шёл целиком.
-    # Дефолт переключится на faster-whisper вместе с самим адаптером (#11).
-    provider: Literal["echo", "faster-whisper"] = "echo"
+    # echo — заглушка без распознавания: для тестов и проверки конвейера без модели.
+    provider: Literal["echo", "faster-whisper"] = "faster-whisper"
     # Дефолт — предположение до замера. Настоящий выбор делает бенчмарк на этом железе (#9)
     # по правилу «лучшее качество при RTF <= 0.5».
     model: str = "large-v3-turbo"
@@ -76,7 +75,8 @@ class ASRSettings(BaseSettings):
     device: Literal["cpu", "cuda", "auto"] = "cpu"
     # Пусто = автоопределение языка.
     language: str | None = "ru"
-    # 0 = по числу ядер. На мобильном 15-ваттном CPU больше потоков не значит быстрее.
+    # 0 = по числу физических ядер: на 5700U 8 потоков дают RTF 0.43, дефолт CTranslate2 (4) —
+    # 0.63. Гиперпотоки не помогают; точное число уточнит замер (#9).
     threads: int = Field(default=0, ge=0)
 
     @field_validator("language", mode="before")
