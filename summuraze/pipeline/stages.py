@@ -34,7 +34,8 @@ INGEST_VERSION = 1
 VAD_VERSION = 1
 # 2: ASR получает интервалы речи от VAD (#10).
 ASR_VERSION = 2
-SUMMARY_VERSION = 1
+# 2: сомнительные сегменты помечены в префиксе, правило про пометку — в system (#12).
+SUMMARY_VERSION = 2
 
 _AUDIO = "audio.wav"
 _AUDIO_INFO = "audio.json"
@@ -84,20 +85,33 @@ def load_transcript(artifact: Path, source: Path) -> Transcript:
     return t.model_copy(update={"source": source})
 
 
+SUSPECT_MARK = "[?]"
+# Уходит в system после промпта профиля: модель должна знать, что значит пометка в транскрипте.
+SUSPECT_RULE = (
+    f"Строки транскрипта с пометкой {SUSPECT_MARK} распознаны ненадёжно: там тишина, шум или "
+    "текст, который распознаватель мог придумать. Не опирайся на них как на факт; если без "
+    "них теряется смысл, напиши, что в этом месте запись неразборчива."
+)
+
+
 def transcript_prefix(transcript: Transcript) -> str:
     """Транскрипт в виде, который уходит модели первым.
 
     Детерминирован байт в байт: никаких дат, путей и ID прогона — иначе кэш префикса у
     провайдера не попадает, и каждый прогон стоит полную цену (CLAUDE.md, «Кэш префикса»).
+    Сомнительные сегменты не выкидываются, а помечаются (#12): «здесь плохо слышно» — тоже
+    информация для конспекта.
     """
     return "\n".join(
-        f"[{fmt_timecode(s.start)}] {s.text.strip()}" for s in transcript.segments if s.text.strip()
+        f"[{fmt_timecode(s.start)}] {SUSPECT_MARK + ' ' if s.suspect else ''}{s.text.strip()}"
+        for s in transcript.segments
+        if s.text.strip()
     )
 
 
 def build_summary(out: Path, llm: LLMProvider, transcript: Transcript, profile: Profile) -> None:
     result = llm.complete(
-        system=profile.system,
+        system=f"{profile.system}\n\n{SUSPECT_RULE}",
         prefix=transcript_prefix(transcript),
         question=profile.question,
         max_tokens=8000,

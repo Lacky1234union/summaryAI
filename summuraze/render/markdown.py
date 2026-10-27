@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from summuraze.types import AudioInfo, LLMResult, Transcript
+from summuraze.types import AudioInfo, LLMResult, Segment, Transcript
 
 
 def fmt_timecode(seconds: float) -> str:
@@ -25,6 +25,14 @@ def fmt_timecode(seconds: float) -> str:
 def note_path(notes_dir: Path, source: Path) -> Path:
     recorded = datetime.fromtimestamp(source.stat().st_mtime).date().isoformat()
     return notes_dir / f"{recorded} {source.stem}.md"
+
+
+def _transcript_line(s: Segment) -> str:
+    text = s.text.strip()
+    if s.suspect:
+        # Не удаляем (#12): читатель видит, что Whisper тут мог выдумать, и может переслушать.
+        text = f"⚠️ *{text}* — {s.suspect_reason}"
+    return f"- `{fmt_timecode(s.start)}` {text}"
 
 
 def render_note(
@@ -50,7 +58,7 @@ def render_note(
         "",
         "## Транскрипт",
         "",
-        *(f"- `{fmt_timecode(s.start)}` {s.text.strip()}" for s in transcript.segments),
+        *(_transcript_line(s) for s in transcript.segments),
         "",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)

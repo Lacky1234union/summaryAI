@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from summuraze.asr import repetition
 from summuraze.asr.base import make_asr
 from summuraze.audio.ingest import IngestError
 from summuraze.audio.vad import NoSpeechError
@@ -172,6 +173,10 @@ class Pipeline:
                     release_memory()
 
             transcript = stages.load_transcript(stage("asr", asr_key, build_asr), source)
+            # Поверх кэша, а не внутри ASR: правка правил не стоит часа транскрибации (#12).
+            transcript = transcript.model_copy(
+                update={"segments": repetition.flag_suspects(transcript.segments)}
+            )
             result.transcript = transcript
             if until == "asr":
                 self.db.finish_run(run_id, "done", asr_model=transcript.asr_model)
@@ -187,6 +192,7 @@ class Pipeline:
                     "model": llm_cfg.model,
                     "profile": prof.name,
                     "profile_version": prof.version,
+                    "suspects": repetition.VERSION,
                 },
             )
 
