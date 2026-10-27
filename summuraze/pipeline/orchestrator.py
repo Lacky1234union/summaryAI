@@ -32,7 +32,7 @@ from summuraze.pipeline.memory import release_memory
 from summuraze.render.markdown import note_path, render_note
 from summuraze.store.artifacts import ArtifactKey, ArtifactStore
 from summuraze.store.db import Database
-from summuraze.summarize.base import make_llm
+from summuraze.summarize.base import check_llm, make_llm
 from summuraze.summarize.profiles import get_profile
 from summuraze.types import ASRProvider, AudioInfo, Interval, LLMProvider, LLMResult, Transcript
 
@@ -99,6 +99,8 @@ class Pipeline:
         # Битый профиль или словарь — до часа транскрибации, а не после.
         prof = get_profile(profile)
         glossary = load_glossary([terms, self.settings.asr.terms_file])
+        if until in ("summarize", "render"):
+            check_llm(self.settings.llm)
         if not source.is_file():
             raise IngestError(f"файл не найден: {source}")
         active = [s for s in STAGES if s != "vad" or self.settings.vad.enabled]

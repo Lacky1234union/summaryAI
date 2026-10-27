@@ -159,6 +159,7 @@ Summuraze/
 │   ├── summarize/
 │   │   ├── base.py              Protocol + фабрика
 │   │   ├── openai_compat.py     единый адаптер: DeepSeek / llama.cpp / OpenRouter / Yandex
+│   │   ├── pricing.py           цена запроса: таблица DeepSeek, часы пик
 │   │   ├── anthropic_llm.py     Claude — опциональный адаптер (другой формат)
 │   │   ├── budget.py            подсчёт токенов, решение single-pass vs иерархия
 │   │   ├── windows.py           нарезка окон по границам фраз с перекрытием

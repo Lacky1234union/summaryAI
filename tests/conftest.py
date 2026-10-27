@@ -21,6 +21,7 @@ def _isolated_data_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Itera
     monkeypatch.setenv("SUMMURAZE_DATA_DIR", str(tmp_path / "data"))
     # Тесты не качают и не грузят Whisper: настоящая модель — только в тестах с маркой `model`.
     monkeypatch.setenv("SUMMURAZE_ASR_PROVIDER", "echo")
+    monkeypatch.setenv("SUMMURAZE_LLM_PROVIDER", "echo")  # и в сеть не ходят
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

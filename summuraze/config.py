@@ -130,9 +130,9 @@ class LLMSettings(BaseSettings):
         env_prefix="SUMMURAZE_LLM_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # openai-compat — единый адаптер для DeepSeek и llama.cpp (#15); echo — заглушка этапа 0.
-    # Это не третий путь «локально/API»: echo никуда не ходит и нужен только пока нет #15.
-    provider: Literal["echo", "openai-compat"] = "echo"
+    # openai-compat — единый адаптер для DeepSeek и llama.cpp (#15); echo — заглушка без сети,
+    # для тестов и проверки конвейера. Это не третий путь «локально/API».
+    provider: Literal["echo", "openai-compat"] = "openai-compat"
     base_url: str = "https://api.deepseek.com/v1"
     # Алиас deepseek-chat retired 24.07.2026 — не использовать.
     model: str = "deepseek-flash"

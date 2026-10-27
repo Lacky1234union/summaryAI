@@ -191,6 +191,7 @@ def _run(
     from summuraze.audio.vad import NoSpeechError
     from summuraze.config import get_settings
     from summuraze.pipeline.orchestrator import Pipeline
+    from summuraze.summarize.openai_compat import LLMError
 
     settings = get_settings()
     if lang is not None:
@@ -203,6 +204,7 @@ def _run(
     except (
         IngestError,
         NoSpeechError,
+        LLMError,
         NotImplementedError,
         ValueError,
         FileNotFoundError,
