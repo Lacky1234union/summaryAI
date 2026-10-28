@@ -540,6 +540,7 @@ def _clean_errors() -> Generator[None, None, None]:
     from summuraze.audio.record import RecordError
     from summuraze.audio.vad import NoSpeechError
     from summuraze.pipeline.stages import SummaryFormatError
+    from summuraze.summarize.budget import TranscriptTooLong
     from summuraze.summarize.openai_compat import LLMError
 
     try:
@@ -551,6 +552,7 @@ def _clean_errors() -> Generator[None, None, None]:
         NoSpeechError,
         LLMError,
         SummaryFormatError,
+        TranscriptTooLong,
         NotImplementedError,
         ValueError,
         FileNotFoundError,
@@ -581,6 +583,8 @@ def _run(
                 pipeline.preflight(until=until, profile=profile, terms=terms)
                 _confirm_remote(pipeline)
             result = pipeline.run(source, until=until, stream=stream, profile=profile, terms=terms)
+            if result.budget is not None:
+                typer.echo(f"Саммари: {result.budget.describe()}")
             if until == "render":
                 _auto_prune(pipeline, keep=result.recording_id)
             return result

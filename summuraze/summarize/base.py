@@ -37,7 +37,7 @@ def make_llm(settings: LLMSettings) -> LLMProvider:
     if settings.provider == "echo":
         from summuraze.summarize.echo import EchoLLM
 
-        return EchoLLM()
+        return EchoLLM(settings.context)
     check_llm(settings)  # и при прямом вызове фабрики, мимо preflight
     from summuraze.summarize.openai_compat import OpenAICompatLLM
 

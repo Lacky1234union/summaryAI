@@ -170,6 +170,10 @@ class LLMProvider(Protocol):
     model: str
     context_window: int
 
+    def count_tokens(self, text: str) -> int | None:
+        """Токены текста токенизатором модели; `None` — провайдер считать не умеет (#16)."""
+        ...
+
     def complete(
         self,
         *,
