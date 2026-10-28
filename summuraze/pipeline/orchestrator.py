@@ -35,6 +35,7 @@ from summuraze.render.markdown import note_layout, publish_media, render_note
 from summuraze.store.artifacts import ArtifactKey, ArtifactStore
 from summuraze.store.db import Database, OutputKind
 from summuraze.summarize.base import check_llm, make_llm
+from summuraze.summarize.budget import Budget, check_speech, output_reserve
 from summuraze.summarize.profiles import Profile, get_profile
 from summuraze.types import ASRProvider, AudioInfo, Interval, LLMProvider, LLMResult, Transcript
 
@@ -63,6 +64,8 @@ class RunResult:
     note: Path | None = None
     cached: dict[str, bool] | None = None
     recording_id: int | None = None
+    # Решение «один запрос или окна» (#16); None — саммари из кэша, запроса не было.
+    budget: Budget | None = None
 
 
 class Pipeline:
@@ -177,6 +180,15 @@ class Pipeline:
                         "в записи не найдено речи — только тишина или музыка. Если речь там "
                         "есть, понизь SUMMURAZE_VAD_THRESHOLD или выключи VAD"
                     )
+            llm_cfg = self.settings.llm
+            if until in ("summarize", "render"):
+                check_speech(
+                    sum(i.duration for i in speech) if speech is not None else audio.duration,
+                    model=llm_cfg.model,
+                    context=llm_cfg.context,
+                    max_tokens=prof.max_tokens,
+                    single_pass_max=llm_cfg.single_pass_max,
+                )
 
             asr_cfg = self.settings.asr
             asr_key = ArtifactKey(
@@ -214,7 +226,8 @@ class Pipeline:
                 self.db.finish_run(run_id, "done", asr_model=transcript.asr_model)
                 return result
 
-            llm_cfg = self.settings.llm
+            # Ответ урезан малым контекстом — это другой запрос; при обычном ключ прежний.
+            output = output_reserve(llm_cfg.context, prof.max_tokens)
             summary_key = ArtifactKey(
                 "summarize",
                 stages.SUMMARY_VERSION,
@@ -225,6 +238,7 @@ class Pipeline:
                     "profile": prof.name,
                     "profile_version": prof.version,
                     "suspects": repetition.VERSION,
+                    **({"max_tokens": output} if output != prof.max_tokens else {}),
                     **({"replacements": glossary.replacements} if glossary.replacements else {}),
                 },
             )
@@ -232,7 +246,9 @@ class Pipeline:
             def build_summary(out: Path) -> None:
                 nonlocal llm_fresh
                 llm = self._llm_factory(llm_cfg)
-                stages.build_summary(out, llm, transcript, prof)
+                result.budget = stages.build_summary(
+                    out, llm, transcript, prof, single_pass_max=llm_cfg.single_pass_max
+                )
                 llm_fresh, _ = stages.load_summary(out, prof)
 
             summary, document = stages.load_summary(

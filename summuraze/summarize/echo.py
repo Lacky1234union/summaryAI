@@ -16,7 +16,12 @@ from summuraze.types import LLMResult, TokenUsage
 class EchoLLM:
     name = "echo"
     model = "echo"
-    context_window = 1_000_000
+
+    def __init__(self, context: int = 1_000_000) -> None:
+        self.context_window = context
+
+    def count_tokens(self, text: str) -> int | None:
+        return None
 
     def complete(
         self,

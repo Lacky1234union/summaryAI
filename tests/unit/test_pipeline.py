@@ -367,6 +367,8 @@ class Hallucinating(Counting):
         class Recording:
             name = llm.name
             model = llm.model
+            context_window = llm.context_window
+            count_tokens = llm.count_tokens
 
             def complete(self, **kw: object) -> LLMResult:
                 sent.append(kw)

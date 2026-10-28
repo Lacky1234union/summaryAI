@@ -213,6 +213,7 @@ class TestRawNote:
 
 class FixedLLM(EchoLLM):
     def __init__(self, text: str) -> None:
+        super().__init__()
         self.reply = text
 
     def complete(self, **kw: Any) -> LLMResult:

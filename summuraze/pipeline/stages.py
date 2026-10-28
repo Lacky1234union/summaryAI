@@ -21,6 +21,7 @@ from summuraze.audio.vad import detect_speech
 from summuraze.config import VADSettings
 from summuraze.render.markdown import fmt_timecode
 from summuraze.render.subtitles import SUSPECT_MARK
+from summuraze.summarize import budget
 from summuraze.summarize.profiles import Profile
 from summuraze.summarize.schema import strict_schema
 from summuraze.types import (
@@ -124,13 +125,35 @@ class SummaryFormatError(RuntimeError):
     """Модель ответила не по схеме профиля — такой ответ в кэш не кладём."""
 
 
-def build_summary(out: Path, llm: LLMProvider, transcript: Transcript, profile: Profile) -> None:
-    result = llm.complete(
-        system=f"{profile.system}\n\n{SUSPECT_RULE}",
-        prefix=transcript_prefix(transcript),
-        question=profile.question,
+def build_summary(
+    out: Path,
+    llm: LLMProvider,
+    transcript: Transcript,
+    profile: Profile,
+    *,
+    single_pass_max: int | None = None,
+) -> budget.Budget:
+    """Один запрос на весь транскрипт, если влезает (#16); иначе — отказ до отправки, а не 400
+    от сервера после минуты загрузки."""
+    system = f"{profile.system}\n\n{SUSPECT_RULE}"
+    prefix = transcript_prefix(transcript)
+    schema = strict_schema(profile.document)
+    # Схему ответа не считаем: llama.cpp делает из неё грамматику, а не промпт, и у DeepSeek
+    # в prompt_tokens её почти нет (замер 2026-10-28: 1343 токена против 1.4k оценки без схемы).
+    plan = budget.plan(
+        llm,
+        [prefix, system, profile.question],
         max_tokens=profile.max_tokens,
-        schema=strict_schema(profile.document),
+        single_pass_max=single_pass_max,
+    )
+    if plan.mode != "single":
+        raise budget.TranscriptTooLong(budget.too_long(llm.model, plan.describe()))
+    result = llm.complete(
+        system=system,
+        prefix=prefix,
+        question=profile.question,
+        max_tokens=plan.output,
+        schema=schema,
     )
     try:
         document = profile.document.model_validate_json(result.text)
@@ -146,6 +169,7 @@ def build_summary(out: Path, llm: LLMProvider, transcript: Transcript, profile: 
         "result": result.model_dump(),
     }
     (out / _SUMMARY).write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
+    return plan
 
 
 def load_summary(artifact: Path, profile: Profile) -> tuple[LLMResult, BaseModel]:

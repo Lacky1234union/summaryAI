@@ -76,6 +76,24 @@ class OpenAICompatLLM:
         self._client = client or httpx.Client(timeout=TIMEOUT, proxy=proxy)
         self._headers = headers
 
+    def count_tokens(self, text: str) -> int | None:
+        """Точный счёт — только у локального сервера: у llama.cpp есть `POST /tokenize`.
+        У OpenRouter и DeepSeek такого эндпоинта нет — там бюджет считает оценкой (#16)."""
+        if not self._local:
+            return None
+        root = self._base_url.removesuffix("/v1")
+        try:
+            response = self._client.post(
+                f"{root}/tokenize", json={"content": text}, headers=self._headers
+            )
+            tokens = response.json().get("tokens") if response.status_code == 200 else None
+        except (httpx.HTTPError, ValueError, AttributeError):
+            tokens = None
+        if not isinstance(tokens, list):
+            logger.info("{} не считает токены (/tokenize) — бюджет по оценке", self._base_url)
+            return None
+        return len(tokens)
+
     def complete(
         self,
         *,
