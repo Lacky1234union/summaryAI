@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from summuraze.asr import repetition
 from summuraze.asr.base import make_asr
-from summuraze.asr.terms import apply_replacements, load_glossary
+from summuraze.asr.terms import Glossary, apply_replacements, load_glossary
 from summuraze.audio.ingest import IngestError
 from summuraze.audio.vad import NoSpeechError
 from summuraze.config import ASRSettings, LLMSettings, Settings
@@ -35,7 +35,7 @@ from summuraze.render.markdown import note_layout, publish_media, render_note
 from summuraze.store.artifacts import ArtifactKey, ArtifactStore
 from summuraze.store.db import Database
 from summuraze.summarize.base import check_llm, make_llm
-from summuraze.summarize.profiles import get_profile
+from summuraze.summarize.profiles import Profile, get_profile
 from summuraze.types import ASRProvider, AudioInfo, Interval, LLMProvider, LLMResult, Transcript
 
 StageName = Literal["ingest", "vad", "asr", "summarize", "audio", "render"]
@@ -89,6 +89,19 @@ class Pipeline:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def preflight(
+        self, *, until: StageName = "render", profile: str = "lecture", terms: Path | None = None
+    ) -> tuple[Profile, Glossary]:
+        """Всё, что может сломать прогон, кроме самого файла, — до часа транскрибации, а не после.
+        `summuraze record` зовёт это до начала записи: узнать про пустой ключ после пары поздно."""
+        prof = get_profile(profile)
+        glossary = load_glossary([terms, self.settings.asr.terms_file])
+        if until in ("summarize", "render"):
+            check_llm(self.settings.llm)
+        if until == "render":
+            _check_output_dir(self.settings.paths.output_dir)
+        return prof, glossary
+
     def run(
         self,
         source: Path,
@@ -99,13 +112,7 @@ class Pipeline:
         terms: Path | None = None,
     ) -> RunResult:
         """`terms` — словарь курса (#13); он важнее общего `SUMMURAZE_ASR_TERMS_FILE`."""
-        # Битый профиль или словарь — до часа транскрибации, а не после.
-        prof = get_profile(profile)
-        glossary = load_glossary([terms, self.settings.asr.terms_file])
-        if until in ("summarize", "render"):
-            check_llm(self.settings.llm)
-        if until == "render":
-            _check_output_dir(self.settings.paths.output_dir)
+        prof, glossary = self.preflight(until=until, profile=profile, terms=terms)
         if not source.is_file():
             raise IngestError(f"файл не найден: {source}")
         note_cfg = self.settings.note

@@ -77,6 +77,37 @@ class NoteSettings(BaseSettings):
     media_dir: str = "Записи"
 
 
+class RecordSettings(BaseSettings):
+    """`summuraze record` (#37): что и куда писать."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_RECORD_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # Оригиналы записей. Срок хранения и чистка — #49.
+    dir: Path = Path("~/Recordings")
+    # Источники PipeWire/PulseAudio (`pactl list short sources`). Пусто — системные по умолчанию:
+    # микрофон и монитор вывода. system=none — только микрофон.
+    mic: str | None = None
+    system: str | None = None
+    # Opus на дорожку: 32 кбит/с ≈ 14 МБ на час, а дорожек две.
+    bitrate_kbps: int = Field(default=32, ge=8, le=256)
+    # Авто-стоп, если все дорожки молчат дольше стольких минут (забыл остановить после пары).
+    # 0 — не останавливать.
+    silence_stop_minutes: float = Field(default=15, ge=0)
+
+    @field_validator("mic", "system", mode="before")
+    @classmethod
+    def _blank_means_default(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @property
+    def directory(self) -> Path:
+        return self.dir.expanduser()
+
+
 class ASRSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SUMMURAZE_ASR_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -200,6 +231,7 @@ class Settings(BaseSettings):
     paths: PathsSettings = Field(default_factory=PathsSettings)
     vad: VADSettings = Field(default_factory=VADSettings)
     note: NoteSettings = Field(default_factory=NoteSettings)
+    record: RecordSettings = Field(default_factory=RecordSettings)
     asr: ASRSettings = Field(default_factory=ASRSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
 

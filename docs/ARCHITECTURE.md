@@ -145,7 +145,7 @@ Summuraze/
 │   ├── audio/
 │   │   ├── ingest.py            ffmpeg-нормализация, метаданные, извлечение из видео
 │   │   ├── vad.py               Silero VAD (ONNX из faster-whisper) → интервалы речи
-│   │   └── record.py            захват через PipeWire: микрофон + звук системы, 2 дорожки (этап 2.5)
+│   │   └── record.py            запись: микрофон + звук системы, 2 дорожки Opus в .mka, уровни, авто-стоп
 │   ├── asr/
 │   │   ├── base.py              Protocol + фабрика
 │   │   ├── faster_whisper.py    дефолт: склейка речи → Whisper → таймкоды слов в исходник

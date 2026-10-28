@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
@@ -19,6 +21,8 @@ import typer
 from summuraze import __version__
 
 if TYPE_CHECKING:
+    from summuraze.audio.record import Source
+    from summuraze.config import Settings
     from summuraze.pipeline.orchestrator import RunResult, StageEvent, StageName
 
 app = typer.Typer(
@@ -39,6 +43,9 @@ TermsOpt = Annotated[
         "--terms",
         help="Словарь терминов курса: по строке на термин, «слышится -> пишется» — замена",
     ),
+]
+ProfileOpt = Annotated[
+    str, typer.Option(help="Профиль документа: lecture — конспект, raw — транскрипт по блокам")
 ]
 LangOpt = Annotated[
     str | None,
@@ -122,9 +129,7 @@ def transcribe(
 @app.command()
 def run(
     source: SourceArg,
-    profile: Annotated[
-        str, typer.Option(help="Профиль документа: lecture — конспект, raw — транскрипт по блокам")
-    ] = "lecture",
+    profile: ProfileOpt = "lecture",
     stream: StreamOpt = None,
     lang: LangOpt = None,
     terms: TermsOpt = None,
@@ -132,6 +137,141 @@ def run(
     """Запись → транскрипт → саммари → заметка."""
     result = _run(source, until="render", stream=stream, profile=profile, lang=lang, terms=terms)
     typer.echo(f"Заметка: {result.note}")
+
+
+@app.command()
+def record(
+    name: Annotated[
+        str | None, typer.Option("--name", "-n", help="Имя записи и заметки, напр. «ЦОС лекция 3»")
+    ] = None,
+    profile: ProfileOpt = "lecture",
+    lang: LangOpt = None,
+    terms: TermsOpt = None,
+    mic_only: Annotated[
+        bool, typer.Option("--mic-only", help="Только микрофон, без звука системы")
+    ] = False,
+    no_run: Annotated[
+        bool, typer.Option("--no-run", help="Только записать, без конспекта")
+    ] = False,
+) -> None:
+    """Записать микрофон и звук системы; по Ctrl+C — конспект в Obsidian."""
+    from summuraze.audio import record as rec
+    from summuraze.pipeline.orchestrator import Pipeline
+
+    settings = _settings(lang)
+    cfg = settings.record
+    with _clean_errors():
+        if not no_run:
+            # Пустой ключ или нет папки хранилища — узнать сейчас, а не после двухчасовой пары.
+            with Pipeline(settings) as pipeline:
+                pipeline.preflight(profile=profile, terms=terms)
+        sources = rec.default_sources(mic=cfg.mic, system="none" if mic_only else cfg.system)
+        for src in sources:
+            if rec.muted(src.name):
+                typer.secho(
+                    f"⚠ {src.title} выключен в системе — запись будет немой. Включить: "
+                    f"pactl set-source-mute {src.name} 0",
+                    fg="yellow",
+                    err=True,
+                )
+        path = rec.record_name(cfg.directory, name)
+        typer.echo(f"● Запись: {path}\n  Ctrl+C — остановить и сделать конспект.")
+        stopped_by_user = _record_loop(path, sources, cfg.bitrate_kbps, cfg.silence_stop_minutes)
+    if stopped_by_user:
+        _absorb_echoed_sigint()
+
+    if not path.is_file() or path.stat().st_size < 4096:
+        typer.echo("Запись пустая — конспект не делаю.")
+        raise typer.Exit(1)
+    typer.echo(f"Сохранено: {path} ({path.stat().st_size / 2**20:.1f} МБ)")
+    if no_run:
+        return
+    result = _run(path, until="render", stream=None, profile=profile, lang=lang, terms=terms)
+    typer.echo(f"Заметка: {result.note}")
+
+
+def _absorb_echoed_sigint(window: float = 2.0) -> None:
+    """Ctrl+C под `uv run` приходит дважды: от терминала и пересланный uv. Второй убивал конвейер
+    сразу после записи — повтор в первые секунды после остановки глотаем. Осознанный Ctrl+C
+    позже прерывает конвейер как обычно."""
+    import signal
+    import time
+
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        time.sleep(window)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def _record_loop(path: Path, sources: list[Source], bitrate: int, silence_minutes: float) -> bool:
+    """Записывать до Ctrl+C или авто-стопа; True — остановил человек."""
+    import sys
+
+    from summuraze.audio import record as rec
+
+    watch = rec.SilenceWatch(silence_minutes)
+    quiet_since: dict[int, float] = {}
+    warned: set[int] = set()
+    tty = sys.stdout.isatty()
+    last_print = 0.0
+    try:
+        with rec.recording(
+            path,
+            rec.pulse_inputs(sources),
+            [s.title for s in sources],
+            bitrate_kbps=bitrate,
+        ) as recording:
+            for levels in recording.levels():
+                # Время потока, а не настенные часы: у живого PipeWire они совпадают, а одна шкала
+                # на индикатор, предупреждения и авто-стоп проверяется тестом.
+                elapsed = levels.at
+                for i, quiet in enumerate(levels.silent()):
+                    if not quiet:
+                        quiet_since.pop(i, None)
+                        continue
+                    since = quiet_since.setdefault(i, elapsed)
+                    # Немая дорожка 10 с подряд — проверить сейчас, а не узнать после пары.
+                    if elapsed - since >= 10 and i not in warned:
+                        warned.add(i)
+                        hint = (
+                            "включён ли микрофон?"
+                            if i == 0
+                            else "звука в системе нет — это нормально, если лекция не онлайн"
+                        )
+                        typer.secho(
+                            f"\n⚠ {sources[i].title}: тишина 10 с — {hint}", fg="yellow", err=True
+                        )
+                line = _meter(elapsed, sources, levels.peaks)
+                if tty:
+                    typer.echo(f"\r{line}", nl=False)
+                elif elapsed - last_print >= 30:
+                    typer.echo(line)
+                    last_print = elapsed
+                if watch.update(levels):
+                    typer.echo(f"\nТишина {silence_minutes:g} мин — останавливаю запись.")
+                    break
+    except KeyboardInterrupt:
+        # Сигнал SIGINT уже пришёл — до конца остановки ffmpeg повторный не должен её сорвать.
+        import signal
+
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        return True
+    finally:
+        if tty:
+            typer.echo("")
+    return False
+
+
+def _meter(elapsed: float, sources: list[Source], peaks: tuple[float, ...]) -> str:
+    h, rem = divmod(int(elapsed), 3600)
+    m, s = divmod(rem, 60)
+    parts = [f"● {h:02d}:{m:02d}:{s:02d}"]
+    for src, peak in zip(sources, peaks, strict=True):
+        filled = max(0, min(10, round((peak + 60) / 6)))
+        level = "тишина" if peak < -50 else f"{peak:4.0f} дБ"
+        parts.append(f"{src.title} {'▮' * filled}{'▯' * (10 - filled)} {level:>7}")
+    return "   ".join(parts)
 
 
 @app.command()
@@ -181,32 +321,31 @@ def _local_time(iso_utc: str) -> str:
     return datetime.fromisoformat(iso_utc).astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-def _run(
-    source: Path,
-    *,
-    until: StageName,
-    stream: int | None,
-    profile: str = "lecture",
-    lang: str | None = None,
-    terms: Path | None = None,
-) -> RunResult:
-    from summuraze.audio.ingest import IngestError
-    from summuraze.audio.vad import NoSpeechError
+def _settings(lang: str | None) -> Settings:
     from summuraze.config import get_settings
-    from summuraze.pipeline.orchestrator import Pipeline
-    from summuraze.pipeline.stages import SummaryFormatError
-    from summuraze.summarize.openai_compat import LLMError
 
     settings = get_settings()
     if lang is not None:
         language = None if lang.strip().lower() in ("", "auto") else lang.strip().lower()
         asr = settings.asr.model_copy(update={"language": language})
         settings = settings.model_copy(update={"asr": asr})
+    return settings
+
+
+@contextmanager
+def _clean_errors() -> Generator[None, None, None]:
+    """Ожидаемые ошибки — одной строкой для человека и кодом 1, без стектрейса."""
+    from summuraze.audio.ingest import IngestError
+    from summuraze.audio.record import RecordError
+    from summuraze.audio.vad import NoSpeechError
+    from summuraze.pipeline.stages import SummaryFormatError
+    from summuraze.summarize.openai_compat import LLMError
+
     try:
-        with Pipeline(settings, on_event=_print_event) as pipeline:
-            return pipeline.run(source, until=until, stream=stream, profile=profile, terms=terms)
+        yield
     except (
         IngestError,
+        RecordError,
         NoSpeechError,
         LLMError,
         SummaryFormatError,
@@ -216,6 +355,21 @@ def _run(
     ) as e:
         typer.echo(f"Ошибка: {e}", err=True)
         raise typer.Exit(1) from e
+
+
+def _run(
+    source: Path,
+    *,
+    until: StageName,
+    stream: int | None,
+    profile: str = "lecture",
+    lang: str | None = None,
+    terms: Path | None = None,
+) -> RunResult:
+    from summuraze.pipeline.orchestrator import Pipeline
+
+    with _clean_errors(), Pipeline(_settings(lang), on_event=_print_event) as pipeline:
+        return pipeline.run(source, until=until, stream=stream, profile=profile, terms=terms)
 
 
 def _print_event(e: StageEvent) -> None:
