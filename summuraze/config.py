@@ -171,6 +171,10 @@ class LLMSettings(BaseSettings):
             "SUMMURAZE_LLM_PROXY_URL", "LLM_PROXY_URL", "OPENROUTER_PROXY_URL"
         ),
     )
+    # OpenRouter отдаёт модель ~40 провайдерам, часть из них — в fp4: на живой записи такой
+    # провайдер скопировал транскрипт во все разделы конспекта (2026-10-28). Пускаем только эти
+    # точности; unknown — провайдеры, не объявившие точность. Пусто — без фильтра.
+    openrouter_quantizations: list[str] = ["fp8", "bf16", "fp16", "fp32", "unknown"]
     # Контекст провайдера: от него считается порог single-pass против иерархии (#16).
     # У DeepSeek V4.1-Flash — 1M, у локальной 8B-модели на два порядка меньше.
     context: int = Field(default=1_000_000, gt=0)

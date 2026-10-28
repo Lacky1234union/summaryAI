@@ -22,7 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -91,10 +91,22 @@ def resolve_at(at: str, transcript: Transcript) -> float | None:
 
 @dataclass(frozen=True)
 class _Body:
-    """Сборка тела заметки: транскрипт для привязки таймкодов и аудио для ссылок."""
+    """Сборка тела заметки: транскрипт для привязки таймкодов и аудио для ссылок.
+
+    Одна мысль попадает в заметку один раз: сбойный провайдер однажды скопировал тезисы во
+    все разделы подряд (2026-10-28) — повтор по нормализованному тексту выбрасывается.
+    """
 
     transcript: Transcript
     media: str | None  # имя файла аудио в хранилище; None — таймкоды текстом
+    seen: set[str] = field(default_factory=set)
+
+    def fresh(self, text: str) -> bool:
+        key = " ".join(re.findall(r"\w+", text.lower()))
+        if not key or key in self.seen:
+            return False
+        self.seen.add(key)
+        return True
 
     def tc(self, seconds: float | None) -> str:
         # Единственное место, где таймкод становится текстом заметки. Пометки verify (#22)
@@ -110,7 +122,7 @@ class _Body:
         return self.tc(resolve_at(at, self.transcript))
 
     def claims(self, items: list[Claim]) -> list[str]:
-        return [f"- {c.text.strip()} {self.at(c.at)}" for c in items]
+        return [f"- {c.text.strip()} {self.at(c.at)}" for c in items if self.fresh(c.text)]
 
     def line(self, s: Segment) -> str:
         text = s.text.strip()
@@ -131,11 +143,14 @@ class _Body:
             [
                 f"- **{t.term.strip()}** — {t.definition.strip()} {self.at(t.at)}"
                 for t in doc.glossary
+                if self.fresh(f"термин {t.term}")
             ],
         )
         lines += _section("Формулы и примеры", self.claims(doc.examples))
         qa: list[str] = []
         for q in doc.qa:
+            if not self.fresh(q.question):
+                continue
             qa.append(f"- **Вопрос:** {q.question.strip()} {self.at(q.at)}")
             if q.answer.strip():
                 qa.append(f"  **Ответ:** {q.answer.strip()}")
