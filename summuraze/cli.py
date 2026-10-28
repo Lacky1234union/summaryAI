@@ -129,8 +129,24 @@ def transcribe(
     lang: LangOpt = None,
     terms: TermsOpt = None,
     local_only: LocalOnlyOpt = False,
+    formats: Annotated[
+        str,
+        typer.Option(
+            "--format", "-f", help="Файлы транскрипта через запятую: json, txt, srt, vtt или all"
+        ),
+    ] = "json,txt,srt",
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", "-o", help="Куда положить файлы (по умолчанию — рядом с записью)"),
+    ] = None,
 ) -> None:
-    """Расшифровать запись (без саммари)."""
+    """Расшифровать запись (без саммари) и положить транскрипт рядом: json, txt, srt."""
+    from summuraze.render.export import export, parse_formats
+
+    try:
+        chosen = parse_formats(formats)
+    except ValueError as e:
+        raise typer.BadParameter(str(e), param_hint="--format") from None
     result = _run(source, until="asr", stream=stream, lang=lang, terms=terms, local_only=local_only)
     assert result.transcript is not None
     t = result.transcript
@@ -144,6 +160,12 @@ def transcribe(
         speech = sum(i.duration for i in result.speech)
         share = speech / t.duration if t.duration else 0.0
         typer.echo(f"  речь: {speech:.1f} с ({share:.0%}), интервалов: {len(result.speech)}")
+    try:
+        written = export(t, source, chosen, out)
+    except OSError as e:
+        typer.secho(f"Не записать транскрипт: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"Транскрипт в {written[0].parent}: {', '.join(p.name for p in written)}")
 
 
 @app.command()
