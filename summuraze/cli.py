@@ -51,6 +51,9 @@ TermsOpt = Annotated[
 ProfileOpt = Annotated[
     str, typer.Option(help="Профиль документа: lecture — конспект, raw — транскрипт по блокам")
 ]
+DebugOpt = Annotated[
+    bool, typer.Option("--debug", help="Отладочный вид заметки: модели, стоимость, всё развёрнуто")
+]
 LangOpt = Annotated[
     str | None,
     typer.Option(
@@ -139,9 +142,18 @@ def run(
     stream: StreamOpt = None,
     lang: LangOpt = None,
     terms: TermsOpt = None,
+    debug: DebugOpt = False,
 ) -> None:
     """Запись → транскрипт → саммари → заметка."""
-    result = _run(source, until="render", stream=stream, profile=profile, lang=lang, terms=terms)
+    result = _run(
+        source,
+        until="render",
+        stream=stream,
+        profile=profile,
+        lang=lang,
+        terms=terms,
+        debug=debug,
+    )
     typer.echo(f"Заметка: {result.note}")
 
 
@@ -159,9 +171,18 @@ def record(
     no_run: Annotated[
         bool, typer.Option("--no-run", help="Только записать, без конспекта")
     ] = False,
+    debug: DebugOpt = False,
 ) -> None:
     """Записать микрофон и звук системы; по Ctrl+C — конспект в Obsidian."""
-    note = _record(name, profile=profile, lang=lang, terms=terms, mic_only=mic_only, no_run=no_run)
+    note = _record(
+        name,
+        profile=profile,
+        lang=lang,
+        terms=terms,
+        mic_only=mic_only,
+        no_run=no_run,
+        debug=debug,
+    )
     if note is not None:
         typer.echo(f"Заметка: {note}")
 
@@ -174,12 +195,13 @@ def _record(
     terms: Path | None = None,
     mic_only: bool = False,
     no_run: bool = False,
+    debug: bool = False,
 ) -> Path | None:
     """Записать и, если не `no_run`, прогнать конвейер; вернуть путь заметки."""
     from summuraze.audio import record as rec
     from summuraze.pipeline.orchestrator import Pipeline
 
-    settings = _settings(lang)
+    settings = _settings(lang, debug)
     cfg = settings.record
     with _clean_errors():
         if not no_run:
@@ -207,7 +229,9 @@ def _record(
     typer.echo(f"Сохранено: {path} ({path.stat().st_size / 2**20:.1f} МБ)")
     if no_run:
         return None
-    return _run(path, until="render", stream=None, profile=profile, lang=lang, terms=terms).note
+    return _run(
+        path, until="render", stream=None, profile=profile, lang=lang, terms=terms, debug=debug
+    ).note
 
 
 def _absorb_echoed_sigint(window: float = 2.0) -> None:
@@ -416,10 +440,13 @@ def _local_time(iso_utc: str) -> str:
     return datetime.fromisoformat(iso_utc).astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-def _settings(lang: str | None) -> Settings:
+def _settings(lang: str | None, debug: bool = False) -> Settings:
     from summuraze.config import get_settings
 
     settings = get_settings()
+    if debug:
+        note = settings.note.model_copy(update={"debug": True})
+        settings = settings.model_copy(update={"note": note})
     if lang is not None:
         language = None if lang.strip().lower() in ("", "auto") else lang.strip().lower()
         asr = settings.asr.model_copy(update={"language": language})
@@ -460,11 +487,12 @@ def _run(
     profile: str = "lecture",
     lang: str | None = None,
     terms: Path | None = None,
+    debug: bool = False,
 ) -> RunResult:
     from summuraze.pipeline.orchestrator import Pipeline
 
     try:
-        with _clean_errors(), Pipeline(_settings(lang), on_event=_print_event) as pipeline:
+        with _clean_errors(), Pipeline(_settings(lang, debug), on_event=_print_event) as pipeline:
             result = pipeline.run(source, until=until, stream=stream, profile=profile, terms=terms)
             if until == "render":
                 _auto_prune(pipeline, keep=result.recording_id)

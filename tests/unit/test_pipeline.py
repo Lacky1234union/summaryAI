@@ -17,7 +17,7 @@ from summuraze.cli import app
 from summuraze.config import ASRSettings, LLMSettings, Settings, get_settings
 from summuraze.pipeline.orchestrator import Pipeline, StageEvent
 from summuraze.pipeline.stages import SUSPECT_RULE, transcript_prefix
-from summuraze.render.markdown import fmt_timecode
+from summuraze.render.markdown import fmt_timecode, short_timecode
 from summuraze.store.db import Database
 from summuraze.summarize.echo import EchoLLM
 from summuraze.types import ASRProvider, LLMProvider, LLMResult, Segment, Transcript
@@ -71,10 +71,10 @@ def test_full_run_produces_note(lecture: Path) -> None:
         result = p.run(lecture)
     assert result.note is not None and result.note.is_file()
     text = result.note.read_text(encoding="utf-8")
-    assert 'llm_model: "echo"' in text and "## Транскрипт" in text
+    assert "llm_model" not in text and "> [!quote]- Транскрипт" in text
     assert result.transcript is not None
     first = result.transcript.segments[0]
-    assert f"#t={first.start:.1f}|{fmt_timecode(first.start)}]] эхо-сегмент 1" in text
+    assert f"#t={first.start:.1f}|▶ {short_timecode(first.start)}]] эхо-сегмент 1" in text
 
 
 def test_asr_sees_only_speech_with_source_timecodes(
@@ -320,7 +320,7 @@ class TestCLI:
         assert result.exit_code == 0 and "аудио для заметки" not in result.output
         [note] = (tmp_path / "data" / "notes").glob("*.md")
         text = note.read_text(encoding="utf-8")
-        assert "[[" not in text and "`00:00:09`" in text
+        assert "[[" not in text and "`00:09`" in text
 
     def test_unknown_profile_is_a_clean_error(self, lecture: Path) -> None:
         result = CliRunner().invoke(app, ["run", str(lecture), "--profile", "nope"])
@@ -444,3 +444,12 @@ def test_other_profile_gets_own_note_and_reuses_asr(lecture: Path) -> None:
     assert raw.note.name == main.note.name.replace(".md", " (raw).md")
     assert main.note.is_file(), "сырой профиль не затирает конспект"
     assert (counting.asr, counting.llm) == (1, 2)
+
+
+def test_debug_flag_gives_full_note(lecture: Path, tmp_path: Path) -> None:
+    """--debug — прежний вид (#50): модели, стоимость, транскрипт развёрнут, полные таймкоды."""
+    result = CliRunner().invoke(app, ["run", str(lecture), "--debug"])
+    assert result.exit_code == 0, result.output
+    [note] = (tmp_path / "data" / "notes").glob("*.md")
+    text = note.read_text(encoding="utf-8")
+    assert 'llm_model: "echo"' in text and "## Транскрипт" in text and "|00:00:09]]" in text

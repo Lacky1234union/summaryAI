@@ -75,6 +75,9 @@ class NoteSettings(BaseSettings):
     audio_bitrate_kbps: int = Field(default=32, ge=8, le=256)
     # Подпапка заметок для аудио и .srt — чтобы в списке заметок не было вложений.
     media_dir: str = "Записи"
+    # Отладочный вид заметки (#50): модели, стоимость, исходник, всё развёрнуто. По умолчанию —
+    # итоговый, для чтения.
+    debug: bool = False
 
 
 class RecordSettings(BaseSettings):
