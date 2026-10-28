@@ -168,7 +168,8 @@ Summuraze/
 │   │   └── verify.py            проверка привязки к таймкодам
 │   ├── render/
 │   │   ├── markdown.py          заметка Obsidian: таймкоды-ссылки Media Extended, аудио и .srt рядом
-│   │   └── subtitles.py         .srt рядом с аудио — интерактивный транскрипт Media Extended
+│   │   ├── subtitles.py         реплики .srt/.vtt по словам: для Media Extended и для плеера
+│   │   └── export.py            transcribe → запись.json/.txt/.srt рядом с исходником
 │   └── store/
 │       ├── db.py                SQLite: состояние задач, история, стоимость
 │       ├── artifacts.py         файлы стадий на диске

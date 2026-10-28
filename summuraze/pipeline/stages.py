@@ -20,6 +20,7 @@ from summuraze.audio.ingest import compress_for_note, ingest
 from summuraze.audio.vad import detect_speech
 from summuraze.config import VADSettings
 from summuraze.render.markdown import fmt_timecode
+from summuraze.render.subtitles import SUSPECT_MARK
 from summuraze.summarize.profiles import Profile
 from summuraze.summarize.schema import strict_schema
 from summuraze.types import (
@@ -96,7 +97,6 @@ def load_transcript(artifact: Path, source: Path) -> Transcript:
     return t.model_copy(update={"source": source})
 
 
-SUSPECT_MARK = "[?]"
 # Уходит в system после промпта профиля: модель должна знать, что значит пометка в транскрипте.
 SUSPECT_RULE = (
     f"Строки транскрипта с пометкой {SUSPECT_MARK} распознаны ненадёжно: там тишина, шум или "
