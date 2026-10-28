@@ -61,6 +61,13 @@ LocalOnlyOpt = Annotated[
         "--local-only", help="Без сети: саммари только локальной моделью, Whisper — только с диска"
     ),
 ]
+LocalOpt = Annotated[
+    bool,
+    typer.Option(
+        "--local",
+        help="Саммари своей моделью (SUMMURAZE_LOCAL_LLM_MODEL) через llama-server; сеть запрещена",
+    ),
+]
 LangOpt = Annotated[
     str | None,
     typer.Option(
@@ -177,6 +184,7 @@ def run(
     terms: TermsOpt = None,
     debug: DebugOpt = False,
     local_only: LocalOnlyOpt = False,
+    local: LocalOpt = False,
 ) -> None:
     """Запись → транскрипт → саммари → заметка."""
     result = _run(
@@ -188,6 +196,7 @@ def run(
         terms=terms,
         debug=debug,
         local_only=local_only,
+        local=local,
     )
     typer.echo(f"Заметка: {result.note}")
 
@@ -208,6 +217,7 @@ def record(
     ] = False,
     debug: DebugOpt = False,
     local_only: LocalOnlyOpt = False,
+    local: LocalOpt = False,
 ) -> None:
     """Записать микрофон и звук системы; по Ctrl+C — конспект в Obsidian."""
     note = _record(
@@ -219,6 +229,7 @@ def record(
         no_run=no_run,
         debug=debug,
         local_only=local_only,
+        local=local,
     )
     if note is not None:
         typer.echo(f"Заметка: {note}")
@@ -234,13 +245,14 @@ def _record(
     no_run: bool = False,
     debug: bool = False,
     local_only: bool = False,
+    local: bool = False,
 ) -> Path | None:
     """Записать и, если не `no_run`, прогнать конвейер; вернуть путь заметки."""
     from summuraze.audio import record as rec
     from summuraze.pipeline.orchestrator import Pipeline
 
     with _clean_errors():
-        settings = _settings(lang, debug, local_only)
+        settings = _settings(lang, debug, local_only, local)
         cfg = settings.record
         if not no_run:
             # Пустой ключ или нет папки хранилища — узнать сейчас, а не после двухчасовой пары.
@@ -277,6 +289,7 @@ def _record(
         terms=terms,
         debug=debug,
         local_only=local_only,
+        local=local,
     ).note
 
 
@@ -516,10 +529,14 @@ def _local_time(iso_utc: str) -> str:
     return datetime.fromisoformat(iso_utc).astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-def _settings(lang: str | None, debug: bool = False, local_only: bool = False) -> Settings:
+def _settings(
+    lang: str | None, debug: bool = False, local_only: bool = False, local: bool = False
+) -> Settings:
     from summuraze.config import get_settings
 
     settings = get_settings()
+    if local:
+        settings = settings.localized()
     if local_only:
         settings = settings.restricted()
     if debug:
@@ -571,13 +588,14 @@ def _run(
     terms: Path | None = None,
     debug: bool = False,
     local_only: bool = False,
+    local: bool = False,
 ) -> RunResult:
     from summuraze.pipeline.orchestrator import Pipeline
 
     try:
         with (
             _clean_errors(),
-            Pipeline(_settings(lang, debug, local_only), on_event=_print_event) as pipeline,
+            Pipeline(_settings(lang, debug, local_only, local), on_event=_print_event) as pipeline,
         ):
             if until in ("summarize", "render"):
                 pipeline.preflight(until=until, profile=profile, terms=terms)

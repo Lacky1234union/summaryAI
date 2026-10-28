@@ -250,10 +250,16 @@ class Pipeline:
 
             def build_summary(out: Path) -> None:
                 nonlocal llm_fresh
+                # Своя модель (#19) поднимается здесь, после ASR, и гаснет до рендера.
                 llm = self._llm_factory(llm_cfg)
-                result.budget = stages.build_summary(
-                    out, llm, transcript, prof, single_pass_max=llm_cfg.single_pass_max
-                )
+                try:
+                    result.budget = stages.build_summary(
+                        out, llm, transcript, prof, single_pass_max=llm_cfg.single_pass_max
+                    )
+                finally:
+                    llm.close()
+                    del llm
+                    release_memory()
                 llm_fresh, _ = stages.load_summary(out, prof)
 
             summary, document = stages.load_summary(

@@ -76,6 +76,9 @@ class OpenAICompatLLM:
         self._client = client or httpx.Client(timeout=TIMEOUT, proxy=proxy)
         self._headers = headers
 
+    def close(self) -> None:
+        self._client.close()
+
     def count_tokens(self, text: str) -> int | None:
         """Точный счёт — только у локального сервера: у llama.cpp есть `POST /tokenize`.
         У OpenRouter и DeepSeek такого эндпоинта нет — там бюджет считает оценкой (#16)."""

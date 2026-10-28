@@ -23,6 +23,9 @@ class EchoLLM:
     def count_tokens(self, text: str) -> int | None:
         return None
 
+    def close(self) -> None:
+        pass
+
     def complete(
         self,
         *,
