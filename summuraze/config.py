@@ -20,12 +20,18 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Хосты, которые считаем локальными при проверке --local-only.
-_LOCAL_HOSTS = ("127.0.0.1", "localhost", "0.0.0.0", "::1", "host.docker.internal")
+# Хосты, которые считаем локальными при проверке --local-only. Сравнение — с разобранным именем
+# хоста, а не подстрокой URL: `https://evil.com/?localhost` локальным не станет.
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1", "host.docker.internal"})
+
+
+def is_local_url(url: str) -> bool:
+    return (urlparse(url).hostname or "") in _LOCAL_HOSTS
 
 
 class PathsSettings(BaseSettings):
@@ -131,6 +137,9 @@ class ASRSettings(BaseSettings):
     # Общий словарь терминов (#13) — можно заметкой в Obsidian. Словарь курса передаётся
     # `--terms` и идёт первым: в подсказку Whisper влезает только ~10 терминов.
     terms_file: Path | None = None
+    # Запрет сети (#20): модель берётся только с диска, скачивание с HuggingFace запрещено.
+    # Ставится из `Settings.local_only`, а не своей переменной.
+    local_only: bool = False
 
     @field_validator("terms_file", mode="before")
     @classmethod
@@ -212,11 +221,18 @@ class LLMSettings(BaseSettings):
     # Контекст провайдера: от него считается порог single-pass против иерархии (#16).
     # У DeepSeek V4.1-Flash — 1M, у локальной 8B-модели на два порядка меньше.
     context: int = Field(default=1_000_000, gt=0)
+    # Запрет сети (#20): фабрика не создаст провайдера с внешним адресом. Ставится из
+    # `Settings.local_only`, а не своей переменной.
+    local_only: bool = False
+
+    @property
+    def host(self) -> str:
+        return urlparse(self.base_url).hostname or ""
 
     @property
     def is_local(self) -> bool:
         # echo никуда не ходит — base_url для него не значит ничего.
-        return self.provider == "echo" or any(host in self.base_url for host in _LOCAL_HOSTS)
+        return self.provider == "echo" or is_local_url(self.base_url)
 
     @field_validator("proxy_url", mode="before")
     @classmethod
@@ -255,13 +271,28 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _local_only_forbids_remote_llm(self) -> Settings:
-        if self.local_only and not self.llm.is_local:
-            raise ValueError(
-                f"SUMMURAZE_LOCAL_ONLY=true, но SUMMURAZE_LLM_BASE_URL смотрит наружу: "
-                f"{self.llm.base_url}. Либо укажи локальный сервер "
-                f"(http://127.0.0.1:8080/v1), либо выключи local_only."
-            )
+        return self._enforce_local_only()
+
+    def _enforce_local_only(self) -> Settings:
+        if self.local_only:
+            # Запрет доезжает до секций: фабрики видят только свою секцию и режут сеть сами.
+            self.llm = self.llm.model_copy(update={"local_only": True})
+            self.asr = self.asr.model_copy(update={"local_only": True})
+            if not self.llm.is_local:
+                raise ValueError(local_only_conflict(self.llm))
         return self
+
+    def restricted(self) -> Settings:
+        """Тот же конфиг под `--local-only`: с той же проверкой, что и из .env."""
+        return self.model_copy(update={"local_only": True})._enforce_local_only()
+
+
+def local_only_conflict(llm: LLMSettings) -> str:
+    return (
+        f"включён --local-only (SUMMURAZE_LOCAL_ONLY), а саммари уходит наружу: {llm.base_url}. "
+        "Транскрипт целиком уехал бы в сеть. Либо локальный сервер "
+        "(SUMMURAZE_LLM_BASE_URL=http://127.0.0.1:8080/v1), либо без --local-only."
+    )
 
 
 @lru_cache(maxsize=1)

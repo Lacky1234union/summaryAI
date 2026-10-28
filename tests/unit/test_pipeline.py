@@ -269,7 +269,11 @@ class TestCLI:
         out = runner.invoke(app, ["transcribe", str(lecture)]).output
         assert "речь:" in out and "интервалов: 2" in out, out
         out = runner.invoke(app, ["log"]).output
-        assert "lecture.m4a" in out and "done" in out
+        assert "lecture.m4a" in out and "готово" in out and "00:35" in out
+        assert "· echo" not in out, "без саммари строки LLM нет"
+        assert runner.invoke(app, ["run", str(lecture)]).exit_code == 0
+        out = runner.invoke(app, ["log"]).output
+        assert "локально · echo" in out and "Итого за 3 прогонов" in out
 
     def test_log_when_empty(self) -> None:
         assert "ещё не было" in CliRunner().invoke(app, ["log"]).output

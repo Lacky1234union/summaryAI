@@ -64,7 +64,7 @@ class OpenAICompatLLM:
         self.context_window = cfg.context
         self._base_url = cfg.base_url.rstrip("/")
         self._local = cfg.is_local
-        self._openrouter = OPENROUTER_HOST in self._base_url
+        self._openrouter = cfg.host == OPENROUTER_HOST
         self._quantizations = cfg.openrouter_quantizations
         headers = {"Content-Type": "application/json"}
         key = cfg.api_key.get_secret_value()

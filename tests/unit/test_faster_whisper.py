@@ -112,7 +112,13 @@ class TestAdapter:
     def test_model_loaded_from_config(self, fake: type[FakeModel]) -> None:
         _asr(model="small", compute_type="int8", threads=6)
         assert fake.created == [
-            {"name": "small", "device": "cpu", "compute_type": "int8", "cpu_threads": 6}
+            {
+                "name": "small",
+                "device": "cpu",
+                "compute_type": "int8",
+                "cpu_threads": 6,
+                "local_files_only": False,
+            }
         ]
 
     def test_factory_builds_adapter(self, fake: type[FakeModel]) -> None:
@@ -234,3 +240,23 @@ def test_real_model_hotwords_fix_term(
     hinted = asr.transcribe(wav, language="ru", terms=["Фурье"]).text
     assert "Фурье" not in plain, plain
     assert "Фурье" in hinted, hinted
+
+
+def test_local_only_never_downloads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--local-only (#20): модель только с диска; нет её — понятная ошибка, а не скачивание."""
+    import faster_whisper
+
+    from summuraze.asr.base import ASRModelMissing
+
+    seen: list[bool] = []
+
+    def missing(name: str, **kw: Any) -> None:
+        seen.append(kw["local_files_only"])
+        raise FileNotFoundError("нет в кэше HF")
+
+    monkeypatch.setattr(faster_whisper, "WhisperModel", missing)
+    with pytest.raises(ASRModelMissing, match="запрещает её скачать"):
+        _asr(model="small", local_only=True)
+    with pytest.raises(FileNotFoundError):
+        _asr(model="small")
+    assert seen == [True, False]

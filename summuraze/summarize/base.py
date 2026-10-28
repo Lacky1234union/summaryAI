@@ -1,14 +1,14 @@
 """Фабрика LLM-провайдеров по конфигу.
 
-Здесь же со временем живёт запрет сети под `--local-only` (#20): фабрика — единственное место,
-через которое конвейер получает провайдера, значит и единственное, где запрет нельзя обойти.
+Здесь же запрет сети под `--local-only` (#20): фабрика — единственное место, через которое
+конвейер получает провайдера, значит и единственное, где запрет нельзя обойти.
 
-Refs #7, #15
+Refs #7, #15, #20
 """
 
 from __future__ import annotations
 
-from summuraze.config import LLMSettings
+from summuraze.config import LLMSettings, local_only_conflict
 from summuraze.types import LLMProvider
 
 
@@ -16,8 +16,14 @@ class LLMNotConfigured(ValueError):
     """Саммари не получится — выясняем до транскрибации, а не после часа работы Whisper."""
 
 
+class NetworkForbidden(LLMNotConfigured):
+    """Под `--local-only` провайдер с внешним адресом не создаётся вовсе."""
+
+
 def check_llm(settings: LLMSettings) -> None:
     remote = settings.provider == "openai-compat" and not settings.is_local
+    if remote and settings.local_only:
+        raise NetworkForbidden(local_only_conflict(settings))
     if remote and not settings.api_key.get_secret_value():
         raise LLMNotConfigured(
             f"для {settings.base_url} нужен ключ: задай OPENROUTER_API_KEY "
@@ -32,7 +38,7 @@ def make_llm(settings: LLMSettings) -> LLMProvider:
         from summuraze.summarize.echo import EchoLLM
 
         return EchoLLM()
-    check_llm(settings)
+    check_llm(settings)  # и при прямом вызове фабрики, мимо preflight
     from summuraze.summarize.openai_compat import OpenAICompatLLM
 
     return OpenAICompatLLM(settings)

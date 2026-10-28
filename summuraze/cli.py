@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
+from urllib.parse import urlparse
 
 import typer
 
@@ -53,6 +54,12 @@ ProfileOpt = Annotated[
 ]
 DebugOpt = Annotated[
     bool, typer.Option("--debug", help="Отладочный вид заметки: модели, стоимость, всё развёрнуто")
+]
+LocalOnlyOpt = Annotated[
+    bool,
+    typer.Option(
+        "--local-only", help="Без сети: саммари только локальной моделью, Whisper — только с диска"
+    ),
 ]
 LangOpt = Annotated[
     str | None,
@@ -117,10 +124,14 @@ def ingest(
 
 @app.command()
 def transcribe(
-    source: SourceArg, stream: StreamOpt = None, lang: LangOpt = None, terms: TermsOpt = None
+    source: SourceArg,
+    stream: StreamOpt = None,
+    lang: LangOpt = None,
+    terms: TermsOpt = None,
+    local_only: LocalOnlyOpt = False,
 ) -> None:
     """Расшифровать запись (без саммари)."""
-    result = _run(source, until="asr", stream=stream, lang=lang, terms=terms)
+    result = _run(source, until="asr", stream=stream, lang=lang, terms=terms, local_only=local_only)
     assert result.transcript is not None
     t = result.transcript
     typer.echo(
@@ -143,6 +154,7 @@ def run(
     lang: LangOpt = None,
     terms: TermsOpt = None,
     debug: DebugOpt = False,
+    local_only: LocalOnlyOpt = False,
 ) -> None:
     """Запись → транскрипт → саммари → заметка."""
     result = _run(
@@ -153,6 +165,7 @@ def run(
         lang=lang,
         terms=terms,
         debug=debug,
+        local_only=local_only,
     )
     typer.echo(f"Заметка: {result.note}")
 
@@ -172,6 +185,7 @@ def record(
         bool, typer.Option("--no-run", help="Только записать, без конспекта")
     ] = False,
     debug: DebugOpt = False,
+    local_only: LocalOnlyOpt = False,
 ) -> None:
     """Записать микрофон и звук системы; по Ctrl+C — конспект в Obsidian."""
     note = _record(
@@ -182,6 +196,7 @@ def record(
         mic_only=mic_only,
         no_run=no_run,
         debug=debug,
+        local_only=local_only,
     )
     if note is not None:
         typer.echo(f"Заметка: {note}")
@@ -196,18 +211,20 @@ def _record(
     mic_only: bool = False,
     no_run: bool = False,
     debug: bool = False,
+    local_only: bool = False,
 ) -> Path | None:
     """Записать и, если не `no_run`, прогнать конвейер; вернуть путь заметки."""
     from summuraze.audio import record as rec
     from summuraze.pipeline.orchestrator import Pipeline
 
-    settings = _settings(lang, debug)
-    cfg = settings.record
     with _clean_errors():
+        settings = _settings(lang, debug, local_only)
+        cfg = settings.record
         if not no_run:
             # Пустой ключ или нет папки хранилища — узнать сейчас, а не после двухчасовой пары.
             with Pipeline(settings) as pipeline:
                 pipeline.preflight(profile=profile, terms=terms)
+                _confirm_remote(pipeline)
         sources = rec.default_sources(mic=cfg.mic, system="none" if mic_only else cfg.system)
         for src in sources:
             if rec.muted(src.name):
@@ -230,7 +247,14 @@ def _record(
     if no_run:
         return None
     return _run(
-        path, until="render", stream=None, profile=profile, lang=lang, terms=terms, debug=debug
+        path,
+        until="render",
+        stream=None,
+        profile=profile,
+        lang=lang,
+        terms=terms,
+        debug=debug,
+        local_only=local_only,
     ).note
 
 
@@ -331,14 +355,44 @@ def log(
     if not runs:
         typer.echo("Прогонов ещё не было.")
         return
+    from summuraze.config import is_local_url
+    from summuraze.render.markdown import short_timecode
+
     for r in runs:
-        cost = f"${r.cost_usd:.4f}" if r.cost_usd is not None else "—"
+        took = f"за {_took(r.seconds)}" if r.seconds is not None else "идёт"
+        length = short_timecode(r.duration) if r.duration is not None else "—"
         typer.echo(
-            f"#{r.id}  {_local_time(r.started_at)}  {r.status:<7}  {Path(r.source).name}  "
-            f"кэш {r.stages_cached}/{r.stages_total}  {r.llm_model or '—'}  {cost}"
+            f"#{r.id}  {_local_time(r.started_at)}  {_STATUS.get(r.status, r.status)}  "
+            f"{Path(r.source).name}  {length}  {took}  кэш {r.stages_cached}/{r.stages_total}"
         )
+        if r.llm_model:
+            # Что куда уехало (#20): хост провайдера, а не только модель.
+            url = r.llm_provider or ""
+            where = (
+                "локально" if url == "echo" or is_local_url(url) else urlparse(url).hostname or url
+            )
+            tokens = ""
+            if r.input_tokens is not None and r.output_tokens is not None:
+                tokens = f" · {_k(r.input_tokens)}→{_k(r.output_tokens)} ток."
+                if r.cached_tokens:
+                    tokens += f" (кэш {_k(r.cached_tokens)})"
+            cost = f"${r.cost_usd:.4f}" if r.cost_usd is not None else "цена —"
+            typer.echo(f"      {where} · {r.llm_model}{tokens} · {cost}")
         if r.error:
             typer.echo(f"      {r.error}")
+    total = sum(r.cost_usd or 0 for r in runs)
+    typer.echo(f"Итого за {len(runs)} прогонов: ${total:.4f}")
+
+
+_STATUS = {"done": "готово ", "failed": "ошибка ", "running": "идёт   "}
+
+
+def _took(seconds: float) -> str:
+    return f"{seconds:.0f} с" if seconds < 90 else f"{seconds / 60:.0f} мин"
+
+
+def _k(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
 
 @app.command()
@@ -440,10 +494,12 @@ def _local_time(iso_utc: str) -> str:
     return datetime.fromisoformat(iso_utc).astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-def _settings(lang: str | None, debug: bool = False) -> Settings:
+def _settings(lang: str | None, debug: bool = False, local_only: bool = False) -> Settings:
     from summuraze.config import get_settings
 
     settings = get_settings()
+    if local_only:
+        settings = settings.restricted()
     if debug:
         note = settings.note.model_copy(update={"debug": True})
         settings = settings.model_copy(update={"note": note})
@@ -457,6 +513,7 @@ def _settings(lang: str | None, debug: bool = False) -> Settings:
 @contextmanager
 def _clean_errors() -> Generator[None, None, None]:
     """Ожидаемые ошибки — одной строкой для человека и кодом 1, без стектрейса."""
+    from summuraze.asr.base import ASRModelMissing
     from summuraze.audio.ingest import IngestError
     from summuraze.audio.record import RecordError
     from summuraze.audio.vad import NoSpeechError
@@ -466,6 +523,7 @@ def _clean_errors() -> Generator[None, None, None]:
     try:
         yield
     except (
+        ASRModelMissing,
         IngestError,
         RecordError,
         NoSpeechError,
@@ -488,11 +546,18 @@ def _run(
     lang: str | None = None,
     terms: Path | None = None,
     debug: bool = False,
+    local_only: bool = False,
 ) -> RunResult:
     from summuraze.pipeline.orchestrator import Pipeline
 
     try:
-        with _clean_errors(), Pipeline(_settings(lang, debug), on_event=_print_event) as pipeline:
+        with (
+            _clean_errors(),
+            Pipeline(_settings(lang, debug, local_only), on_event=_print_event) as pipeline,
+        ):
+            if until in ("summarize", "render"):
+                pipeline.preflight(until=until, profile=profile, terms=terms)
+                _confirm_remote(pipeline)
             result = pipeline.run(source, until=until, stream=stream, profile=profile, terms=terms)
             if until == "render":
                 _auto_prune(pipeline, keep=result.recording_id)
@@ -501,6 +566,35 @@ def _run(
         # Стадия упала или прервана — секундомер не должен тикать поверх сообщения об ошибке.
         if _print_event.halt():
             typer.echo("")
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _confirm_remote(pipeline: Pipeline) -> None:
+    """Транскрипт уезжает наружу — один раз на хост показать, что именно, и запомнить ответ
+    (#20). Спрашиваем до транскрибации: после часа Whisper человека у терминала может не быть."""
+    llm = pipeline.settings.llm
+    if llm.is_local or pipeline.db.has_consent(llm.host):
+        return
+    typer.echo(
+        f"Саммари делает {llm.host} ({llm.model}): туда уйдёт текст транскрипта целиком — "
+        "около 20 тыс. токенов на час записи. Аудио наружу не уходит никогда."
+    )
+    if not _interactive():
+        typer.echo(
+            f"Ошибка: первую отправку на {llm.host} нужно разрешить в терминале — запусти "
+            "команду там один раз. Без сети — --local-only и локальный сервер.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if not typer.confirm(f"Отправлять на {llm.host}? Ответ запомню", default=False):
+        typer.echo(
+            "Не отправляю. Без сети: --local-only и SUMMURAZE_LLM_BASE_URL=http://127.0.0.1:8080/v1"
+        )
+        raise typer.Exit(1)
+    pipeline.db.grant_consent(llm.host)
 
 
 def _auto_prune(pipeline: Pipeline, *, keep: int | None) -> None:
