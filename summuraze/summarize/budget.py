@@ -27,9 +27,9 @@ from summuraze.types import LLMProvider
 # таймкодами — 3.19 символа на токен, сплошной текст — 4.29 (1.55 токена на слово; английский
 # ~1.3). Таймкод `[ЧЧ:ММ:СС] ` — около 8 токенов на строку. Берём 3.0: оценка выходит с запасом.
 CHARS_PER_TOKEN = 3.0
-# Нижняя граница плотности речи: тот же замер — 5.4 токена на секунду речи с таймкодами. По ней
-# судим до ASR: если даже так не влезает — не тратить час на Whisper ради отказа.
-MIN_TOKENS_PER_SPEECH_SECOND = 3.0
+# Меньше — окно вмещает пару минут речи, и карта из таких окон теряет смысл: конспекта
+# на таком контексте не сделать, честнее отказать до ASR.
+MIN_CONTEXT = 4096
 # Роли, служебные токены шаблона чата, заголовки сообщения.
 TEMPLATE_TOKENS = 64
 # На ответ — не больше четверти контекста: у малого контекста max_tokens профиля (16k)
@@ -40,7 +40,11 @@ Mode = Literal["single", "windows"]
 
 
 class TranscriptTooLong(RuntimeError):
-    """Транскрипт не влезает в один запрос, а окна (#21) ещё не сделаны."""
+    """Не влезает даже окнами: окно меньше промпта или карта всей записи больше порога."""
+
+
+class ContextTooSmall(ValueError):
+    """Контекст модели слишком мал для конспекта — выясняем до ASR."""
 
 
 def estimate_tokens(text: str) -> int:
@@ -58,6 +62,14 @@ def input_limit(context: int, max_tokens: int, single_pass_max: int | None = Non
     return min(limit, single_pass_max) if single_pass_max else limit
 
 
+Final = Literal["transcript", "map", "merge"]
+_FINAL = {
+    "transcript": "итог — по карте и полному транскрипту",
+    "map": "итог — по карте: транскрипт целиком не влезает",
+    "merge": "блоки окон склеены",
+}
+
+
 @dataclass(frozen=True)
 class Budget:
     mode: Mode
@@ -66,14 +78,22 @@ class Budget:
     context: int
     output: int
     exact: bool
+    # Заполняет двухпроходная схема (#21), когда запись прошла окнами.
+    windows: int = 0
+    final: Final | None = None
 
     def describe(self) -> str:
-        what = "один запрос" if self.mode == "single" else "в один запрос не влезает"
         how = "токенизатор сервера" if self.exact else "оценка по символам"
-        return (
-            f"{what}: {human_tokens(self.prompt)} из {human_tokens(self.limit)} токенов "
+        sizes = (
+            f"{human_tokens(self.prompt)} из {human_tokens(self.limit)} токенов "
             f"({how}; контекст {human_tokens(self.context)}, на ответ {human_tokens(self.output)})"
         )
+        if self.mode == "single":
+            return f"один запрос: {sizes}"
+        if not self.windows:
+            return f"в один запрос не влезает: {sizes}"
+        tail = f"; {_FINAL[self.final]}" if self.final else ""
+        return f"окнами — {self.windows} шт.: {sizes}{tail}"
 
 
 def plan(
@@ -101,32 +121,18 @@ def plan(
     return budget
 
 
-def check_speech(
-    speech_seconds: float,
-    *,
-    model: str,
-    context: int,
-    max_tokens: int,
-    single_pass_max: int | None = None,
-) -> None:
-    """До ASR, по длительности речи: отказ, только если не влезет даже по нижней оценке."""
-    floor = math.ceil(speech_seconds * MIN_TOKENS_PER_SPEECH_SECOND)
-    limit = input_limit(context, max_tokens, single_pass_max)
-    if floor > limit:
-        raise TranscriptTooLong(
-            too_long(
-                model,
-                f"{speech_seconds / 60:.0f} мин речи — не меньше {human_tokens(floor)} токенов, "
-                f"а одним запросом уходит {human_tokens(limit)}",
-            )
+def check_context(context: int) -> None:
+    if context < MIN_CONTEXT:
+        raise ContextTooSmall(
+            f"контекст модели {human_tokens(context)} токенов — для конспекта нужно хотя бы "
+            f"{human_tokens(MIN_CONTEXT)}: задай SUMMURAZE_LLM_CONTEXT по модели"
         )
 
 
 def too_long(model: str, detail: str) -> str:
     return (
-        f"транскрипт не влезает в один запрос к {model} ({detail}). Длинные записи окнами — "
-        "#21, пока не сделано. Пока — модель с большим контекстом (SUMMURAZE_LLM_CONTEXT) "
-        "или `summuraze transcribe`: транскрипт без саммари"
+        f"запись не обработать даже окнами на {model} ({detail}). Нужна модель с большим "
+        "контекстом (SUMMURAZE_LLM_CONTEXT) или `summuraze transcribe`: транскрипт без саммари"
     )
 
 
