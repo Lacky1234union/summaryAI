@@ -122,7 +122,7 @@ class TestResolveAt:
         assert resolve_at("00:00:05", late) == 5.0
 
 
-def _render(tmp_path: Path, profile: str, document: dict[str, Any]) -> str:
+def _render(tmp_path: Path, profile: str, document: dict[str, Any], *, debug: bool = True) -> str:
     prof = get_profile(profile)
     note = render_note(
         NoteLayout(tmp_path / "n.md", tmp_path / "Записи", "2026-10-27 lecture"),
@@ -131,6 +131,7 @@ def _render(tmp_path: Path, profile: str, document: dict[str, Any]) -> str:
         summary=LLMResult(text="", model="m", usage=TokenUsage(input=0, output=0)),
         document=prof.document.model_validate(document),
         profile=profile,
+        debug=debug,
     )
     return note.read_text(encoding="utf-8")
 
@@ -161,6 +162,29 @@ class TestLectureNote:
 
     def test_empty_title_falls_back_to_file(self, tmp_path: Path) -> None:
         assert "# lecture" in _render(tmp_path, "lecture", {**LECTURE, "title": " "})
+
+
+class TestCleanNote:
+    """Итоговый вид (#50): то же содержание, другая подача."""
+
+    def test_layout(self, tmp_path: Path) -> None:
+        text = _render(tmp_path, "lecture", LECTURE, debug=False)
+        head = text.split("---")[1]
+        assert 'aliases: ["Цифровая обработка сигналов"]' in head
+        assert 'duration: "05:00"' in head and 'tags: ["summuraze", "лекция"]' in head
+        assert "llm_model" not in head and "source" not in head and "cost_usd" not in head
+        assert "> [!summary] Коротко\n> - Фурье раскладывает сигнал на гармоники `00:12`" in text
+        assert "## Котельников `01:35`" in text
+        assert "> [!abstract] Глоссарий\n> - **Гармоника** — синусоида `00:12`" in text
+        assert "> [!question] А если сигнал не периодический? `01:35`\n\n" in text
+        assert "> [!warning]- Неразборчиво" in text, "неразборчивое — свёрнуто"
+        assert "> [!quote]- Транскрипт\n> - `00:00` Сегодня говорим" in text
+        assert "## Транскрипт" not in text and "Что почитать" not in text
+        assert "- Выдумка ⚠️ без таймкода" in text, "guardrail #5 и в чистом виде"
+
+    def test_raw_profile_tag(self, tmp_path: Path) -> None:
+        text = _render(tmp_path, "raw", {"blocks": []}, debug=False)
+        assert 'tags: ["summuraze", "транскрипт"]' in text
 
 
 class TestRawNote:

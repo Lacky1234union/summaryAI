@@ -15,6 +15,11 @@
 Имена — от даты записи (mtime исходника) и имени файла, а не от времени прогона: повторный
 прогон перезаписывает своё, а не плодит «лекция (1).md». Файлы пишутся, только если изменились:
 LiveSync не должен заново рассылать 15 МБ аудио из-за повторного прогона.
+
+Два вида заметки (#50). Итоговый — для чтения: короткий frontmatter, TL;DR и вопросы в callout'ах,
+транскрипт и «неразборчиво» свёрнуты, таймкоды `▶ 01:37`. Отладочный (`SUMMURAZE_NOTE_DEBUG`,
+`--debug`) — всё подряд: модели, стоимость, исходник, полные таймкоды; по нему разбирают, что
+сделала модель. Содержание одно и то же — разная только подача.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from summuraze.summarize.profiles import Claim, LectureDoc, RawDoc
 from summuraze.types import AudioInfo, LLMResult, Segment, Transcript
 
 DEFAULT_PROFILE = "lecture"
+_PROFILE_TAGS = {"lecture": "лекция", "raw": "транскрипт"}
 # Символы, которые ломают вики-ссылку Obsidian (`#`, `|`, `^`, `[`, `]`) или имя файла на
 # какой-нибудь из ОС, где открывают хранилище.
 _UNSAFE = re.compile(r'[\\/:*?"<>|#^\[\]]')
@@ -44,6 +50,13 @@ def fmt_timecode(seconds: float) -> str:
     h, rem = divmod(total, 3600)
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def short_timecode(seconds: float) -> str:
+    """`01:37`, а час и больше — `1:02:05`: в заметке лекции часы почти всегда нулевые."""
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 @dataclass(frozen=True)
@@ -99,6 +112,7 @@ class _Body:
 
     transcript: Transcript
     media: str | None  # имя файла аудио в хранилище; None — таймкоды текстом
+    debug: bool = True
     seen: set[str] = field(default_factory=set)
 
     def fresh(self, text: str) -> bool:
@@ -113,7 +127,12 @@ class _Body:
         # о непроверенных утверждениях встанут сюда же.
         if seconds is None:
             return "⚠️ без таймкода"
-        label = fmt_timecode(seconds)
+        if self.debug:
+            label = fmt_timecode(seconds)
+        elif self.media is None:
+            label = short_timecode(seconds)
+        else:
+            label = f"▶ {short_timecode(seconds)}"  # ▶ — кликабельно, откроет запись
         if self.media is None:
             return f"`{label}`"
         return f"[[{self.media}#t={seconds:.1f}|{label}]]"
@@ -132,9 +151,38 @@ class _Body:
         return f"- {self.tc(s.start)} {text}"
 
     def transcript_section(self) -> list[str]:
-        return ["## Транскрипт", "", *(self.line(s) for s in self.transcript.segments), ""]
+        lines = [self.line(s) for s in self.transcript.segments]
+        if not self.debug:
+            return _callout("quote", "Транскрипт", lines, folded=True)
+        return ["## Транскрипт", "", *lines, ""]
 
     def lecture(self, doc: LectureDoc) -> list[str]:
+        return self.lecture_debug(doc) if self.debug else self.lecture_clean(doc)
+
+    def lecture_clean(self, doc: LectureDoc) -> list[str]:
+        """Итоговый вид: читается сверху вниз, справочное — в callout'ах, сырое — свёрнуто."""
+        lines = _callout("summary", "Коротко", self.claims(doc.tldr))
+        for sec in doc.sections:
+            lines += [f"## {sec.title.strip()} {self.at(sec.at)}", "", *self.claims(sec.theses), ""]
+        lines += _section("Формулы и примеры", self.claims(doc.examples))
+        lines += _callout(
+            "abstract",
+            "Глоссарий",
+            [
+                f"- **{t.term.strip()}** — {t.definition.strip()} {self.at(t.at)}"
+                for t in doc.glossary
+                if self.fresh(f"термин {t.term}")
+            ],
+        )
+        for q in doc.qa:
+            if self.fresh(q.question):
+                answer = [q.answer.strip()] if q.answer.strip() else []
+                lines += _callout("question", f"{q.question.strip()} {self.at(q.at)}", answer)
+        lines += _callout("info", "Что почитать", self.claims(doc.reading))
+        lines += _callout("warning", "Неразборчиво", self.claims(doc.unclear), folded=True)
+        return lines + self.transcript_section()
+
+    def lecture_debug(self, doc: LectureDoc) -> list[str]:
         lines = _section("Коротко", self.claims(doc.tldr))
         for sec in doc.sections:
             lines += [f"## {sec.title.strip()} {self.at(sec.at)}", "", *self.claims(sec.theses), ""]
@@ -187,6 +235,14 @@ def _section(title: str, body: list[str]) -> list[str]:
     return [f"## {title}", "", *body, ""] if body else []
 
 
+def _callout(kind: str, title: str, body: list[str], *, folded: bool = False) -> list[str]:
+    """Callout Obsidian; пустой — не рисуем, кроме вопроса без ответа (заголовок и есть суть)."""
+    if not body and kind != "question":
+        return []
+    mark = "-" if folded else ""
+    return [f"> [!{kind}]{mark} {title}", *(f"> {line}" for line in body), ""]
+
+
 def publish_media(layout: NoteLayout, audio: Path | None, transcript: Transcript) -> str | None:
     """Положить аудио и субтитры рядом с заметкой; вернуть имя аудио для ссылок."""
     if audio is None:
@@ -205,8 +261,9 @@ def render_note(
     document: BaseModel,
     profile: str,
     media: str | None = None,
+    debug: bool = False,
 ) -> Path:
-    body = _Body(transcript, media)
+    body = _Body(transcript, media, debug)
     if isinstance(document, LectureDoc):
         title = document.title.strip() or audio.source.stem
         lines = body.lecture(document)
@@ -216,19 +273,29 @@ def render_note(
     else:  # pragma: no cover — новый профиль без рендера
         raise TypeError(f"нет рендера для документа {type(document).__name__}")
 
-    meta: dict[str, object] = {
-        "title": title,
-        "source": str(audio.source),
-        "recorded": layout.base.split(" ", 1)[0],
-        "duration": fmt_timecode(audio.duration),
-        "profile": profile,
-        "asr_model": transcript.asr_model,
-        "llm_model": summary.model,
-        "cost_usd": summary.cost_usd,
-    }
+    recorded = layout.base.split(" ", 1)[0]
+    if debug:
+        meta: dict[str, object] = {
+            "title": title,
+            "source": str(audio.source),
+            "recorded": recorded,
+            "duration": fmt_timecode(audio.duration),
+            "profile": profile,
+            "asr_model": transcript.asr_model,
+            "llm_model": summary.model,
+            "cost_usd": summary.cost_usd,
+        }
+    else:
+        # Файл назван по дате и имени записи — тема лекции в aliases, чтобы поиск и ссылки
+        # Obsidian находили заметку по ней.
+        meta = {
+            "aliases": [title],
+            "recorded": recorded,
+            "duration": short_timecode(audio.duration),
+        }
     if media is not None:
         meta["audio"] = f"[[{media}]]"
-    meta["tags"] = ["summuraze"]
+    meta["tags"] = ["summuraze"] if debug else ["summuraze", _PROFILE_TAGS.get(profile, profile)]
     head = [
         "---",
         # JSON — подмножество YAML: кавычки и экранирование путей и названий без своей логики.

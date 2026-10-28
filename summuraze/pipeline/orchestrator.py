@@ -274,6 +274,7 @@ class Pipeline:
                     document=document,
                     profile=prof.name,
                     media=media,
+                    debug=note_cfg.debug,
                 )
                 # Срок хранения (#49) найдёт аудио и заметку по БД, а не угадыванием имён.
                 outputs: list[tuple[OutputKind, Path]] = [("note", result.note)]
