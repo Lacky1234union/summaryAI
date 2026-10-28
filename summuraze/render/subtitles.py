@@ -20,7 +20,7 @@ def srt_time(seconds: float) -> str:
 
 
 def to_srt(transcript: Transcript) -> str:
-    cues = []
+    cues: list[str] = []
     for seg in transcript.segments:
         text = seg.text.strip()
         if not text:
