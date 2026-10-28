@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from pydantic import BaseModel
+
 from summuraze.asr import repetition
 from summuraze.asr.base import make_asr
 from summuraze.asr.terms import apply_replacements, load_glossary
@@ -57,6 +59,7 @@ class RunResult:
     speech: list[Interval] | None = None
     transcript: Transcript | None = None
     summary: LLMResult | None = None
+    document: BaseModel | None = None
     note: Path | None = None
     cached: dict[str, bool] | None = None
 
@@ -218,20 +221,24 @@ class Pipeline:
                 nonlocal llm_fresh
                 llm = self._llm_factory(llm_cfg)
                 stages.build_summary(out, llm, transcript, prof)
-                llm_fresh = stages.load_summary(out)
+                llm_fresh, _ = stages.load_summary(out, prof)
 
-            summary = stages.load_summary(stage("summarize", summary_key, build_summary))
+            summary, document = stages.load_summary(
+                stage("summarize", summary_key, build_summary), prof
+            )
             result.summary = summary
+            result.document = document
 
             if until == "render":
                 index = active.index("render") + 1
                 self._on_event(StageEvent("render", index, total, "start"))
                 started = time.monotonic()
                 result.note = render_note(
-                    note_path(self.settings.paths.notes_dir, source),
+                    note_path(self.settings.paths.notes_dir, source, prof.name),
                     audio=audio,
                     transcript=transcript,
                     summary=summary,
+                    document=document,
                     profile=prof.name,
                 )
                 seconds = time.monotonic() - started

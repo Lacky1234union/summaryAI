@@ -121,7 +121,9 @@ def transcribe(
 @app.command()
 def run(
     source: SourceArg,
-    profile: Annotated[str, typer.Option(help="Профиль документа")] = "lecture",
+    profile: Annotated[
+        str, typer.Option(help="Профиль документа: lecture — конспект, raw — транскрипт по блокам")
+    ] = "lecture",
     stream: StreamOpt = None,
     lang: LangOpt = None,
     terms: TermsOpt = None,
@@ -191,6 +193,7 @@ def _run(
     from summuraze.audio.vad import NoSpeechError
     from summuraze.config import get_settings
     from summuraze.pipeline.orchestrator import Pipeline
+    from summuraze.pipeline.stages import SummaryFormatError
     from summuraze.summarize.openai_compat import LLMError
 
     settings = get_settings()
@@ -205,6 +208,7 @@ def _run(
         IngestError,
         NoSpeechError,
         LLMError,
+        SummaryFormatError,
         NotImplementedError,
         ValueError,
         FileNotFoundError,

@@ -14,7 +14,7 @@ Refs #4
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -177,8 +177,11 @@ class LLMProvider(Protocol):
         prefix: str,
         question: str,
         max_tokens: int,
+        schema: dict[str, Any] | None = None,
     ) -> LLMResult:
         """Один запрос к модели.
+
+        `schema` — JSON-схема ответа (structured outputs, #17): с ней `text` — JSON по схеме.
 
         `prefix` и `question` разделены не для удобства: кэш префикса требует, чтобы транскрипт шёл
         первым и байт в байт, а всё изменчивое — после него. Слить их в один `user` означает
