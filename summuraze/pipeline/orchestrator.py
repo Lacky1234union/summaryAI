@@ -31,15 +31,15 @@ from summuraze.audio.vad import NoSpeechError
 from summuraze.config import ASRSettings, LLMSettings, Settings
 from summuraze.pipeline import stages
 from summuraze.pipeline.memory import release_memory
-from summuraze.render.markdown import note_path, render_note
+from summuraze.render.markdown import note_layout, publish_media, render_note
 from summuraze.store.artifacts import ArtifactKey, ArtifactStore
 from summuraze.store.db import Database
 from summuraze.summarize.base import check_llm, make_llm
 from summuraze.summarize.profiles import get_profile
 from summuraze.types import ASRProvider, AudioInfo, Interval, LLMProvider, LLMResult, Transcript
 
-StageName = Literal["ingest", "vad", "asr", "summarize", "render"]
-STAGES: tuple[StageName, ...] = ("ingest", "vad", "asr", "summarize", "render")
+StageName = Literal["ingest", "vad", "asr", "summarize", "audio", "render"]
+STAGES: tuple[StageName, ...] = ("ingest", "vad", "asr", "summarize", "audio", "render")
 
 
 @dataclass(frozen=True)
@@ -104,9 +104,13 @@ class Pipeline:
         glossary = load_glossary([terms, self.settings.asr.terms_file])
         if until in ("summarize", "render"):
             check_llm(self.settings.llm)
+        if until == "render":
+            _check_output_dir(self.settings.paths.output_dir)
         if not source.is_file():
             raise IngestError(f"файл не найден: {source}")
-        active = [s for s in STAGES if s != "vad" or self.settings.vad.enabled]
+        note_cfg = self.settings.note
+        skipped = {"vad": not self.settings.vad.enabled, "audio": not note_cfg.audio}
+        active = [s for s in STAGES if not skipped.get(s)]
         total = active.index(until) + 1
         recording_id, source_hash = self.db.register_source(source)
         run_id = self.db.start_run(recording_id)
@@ -230,16 +234,37 @@ class Pipeline:
             result.document = document
 
             if until == "render":
+                note_audio: Path | None = None
+                if note_cfg.audio:
+                    audio_key = ArtifactKey(
+                        "note-audio",
+                        stages.NOTE_AUDIO_VERSION,
+                        (ingest_key.digest,),
+                        {"bitrate_kbps": note_cfg.audio_bitrate_kbps},
+                    )
+                    artifact = stage(
+                        "audio",
+                        audio_key,
+                        lambda out: stages.build_note_audio(
+                            out, audio, bitrate_kbps=note_cfg.audio_bitrate_kbps
+                        ),
+                    )
+                    note_audio = artifact / stages.NOTE_AUDIO
+
                 index = active.index("render") + 1
                 self._on_event(StageEvent("render", index, total, "start"))
                 started = time.monotonic()
+                layout = note_layout(
+                    self.settings.paths.notes_dir, source, prof.name, note_cfg.media_dir
+                )
                 result.note = render_note(
-                    note_path(self.settings.paths.notes_dir, source, prof.name),
+                    layout,
                     audio=audio,
                     transcript=transcript,
                     summary=summary,
                     document=document,
                     profile=prof.name,
+                    media=publish_media(layout, note_audio, transcript),
                 )
                 seconds = time.monotonic() - started
                 cached["render"] = False
@@ -261,6 +286,20 @@ class Pipeline:
         except BaseException as e:
             self.db.finish_run(run_id, "failed", error=f"{type(e).__name__}: {e}")
             raise
+
+
+class OutputDirError(ValueError):
+    """Папка заметок не найдена — выясняем до транскрибации, а не после."""
+
+
+def _check_output_dir(output_dir: Path | None) -> None:
+    # Свою папку по умолчанию (data/notes) создаём сами; заданную в .env — нет: опечатка в пути к
+    # хранилищу молча создала бы папки не там, и заметки «пропадали» бы.
+    if output_dir is not None and not output_dir.expanduser().is_dir():
+        raise OutputDirError(
+            f"папки для заметок нет: {output_dir} — создай её в хранилище Obsidian "
+            "или поправь SUMMURAZE_OUTPUT_DIR"
+        )
 
 
 def _asr_params(cfg: ASRSettings) -> dict[str, Any]:

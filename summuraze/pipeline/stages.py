@@ -16,7 +16,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from summuraze.audio.ingest import ingest
+from summuraze.audio.ingest import compress_for_note, ingest
 from summuraze.audio.vad import detect_speech
 from summuraze.config import VADSettings
 from summuraze.render.markdown import fmt_timecode
@@ -32,6 +32,7 @@ from summuraze.types import (
 )
 
 INGEST_VERSION = 1
+NOTE_AUDIO_VERSION = 1
 VAD_VERSION = 1
 # 2: ASR получает интервалы речи от VAD (#10).
 ASR_VERSION = 2
@@ -59,6 +60,13 @@ def load_ingest(artifact: Path, source: Path) -> AudioInfo:
 
 
 _Intervals = TypeAdapter(list[Interval])
+
+
+NOTE_AUDIO = "audio.ogg"
+
+
+def build_note_audio(out: Path, audio: AudioInfo, *, bitrate_kbps: int) -> None:
+    compress_for_note(audio.wav, out / NOTE_AUDIO, bitrate_kbps=bitrate_kbps)
 
 
 def build_vad(out: Path, audio: AudioInfo, cfg: VADSettings) -> None:

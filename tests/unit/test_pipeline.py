@@ -71,10 +71,10 @@ def test_full_run_produces_note(lecture: Path) -> None:
         result = p.run(lecture)
     assert result.note is not None and result.note.is_file()
     text = result.note.read_text(encoding="utf-8")
-    assert "llm_model: echo" in text and "## Транскрипт" in text
+    assert 'llm_model: "echo"' in text and "## Транскрипт" in text
     assert result.transcript is not None
     first = result.transcript.segments[0]
-    assert f"`{fmt_timecode(first.start)}` эхо-сегмент 1" in text
+    assert f"#t={first.start:.1f}|{fmt_timecode(first.start)}]] эхо-сегмент 1" in text
 
 
 def test_asr_sees_only_speech_with_source_timecodes(
@@ -143,6 +143,7 @@ def test_second_run_takes_everything_from_cache(lecture: Path) -> None:
         "vad": True,
         "asr": True,
         "summarize": True,
+        "audio": True,
         "render": False,
     }
     finished = {e.stage: e.status for e in events if e.status != "start"}
@@ -151,6 +152,7 @@ def test_second_run_takes_everything_from_cache(lecture: Path) -> None:
         "vad": "cached",
         "asr": "cached",
         "summarize": "cached",
+        "audio": "cached",
         "render": "done",
     }
 
@@ -259,7 +261,7 @@ class TestCLI:
         assert first.exit_code == 0, first.output
         assert "Заметка:" in first.output
         second = runner.invoke(app, ["run", str(lecture)])
-        assert second.output.count("из кэша") == 4, second.output
+        assert second.output.count("из кэша") == 5, second.output
 
     def test_transcribe_then_log(self, lecture: Path) -> None:
         runner = CliRunner()
@@ -278,9 +280,47 @@ class TestCLI:
         vault = tmp_path / "vault" / "Лекции"
         monkeypatch.setenv("SUMMURAZE_OUTPUT_DIR", str(vault))
         get_settings.cache_clear()
+        missing = CliRunner().invoke(app, ["run", str(lecture)])
+        assert missing.exit_code == 1 and "папки для заметок нет" in missing.output
+        assert "[1/" not in missing.output, "отказ — до первой стадии, а не после ASR"
+
+        vault.mkdir(parents=True)
         result = CliRunner().invoke(app, ["run", str(lecture)])
         assert result.exit_code == 0, result.output
-        assert [p.suffix for p in vault.iterdir()] == [".md"]
+        [note] = vault.glob("*.md")
+        media = vault / "Записи"
+        assert sorted(p.name for p in media.iterdir()) == [
+            f"{note.stem}.ogg",
+            f"{note.stem}.ru.srt",
+        ]
+        text = note.read_text(encoding="utf-8")
+        assert f"![[{note.stem}.ogg]]" in text and f'audio: "[[{note.stem}.ogg]]"' in text
+
+    def test_rerun_does_not_rewrite_unchanged_files(
+        self, lecture: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LiveSync рассылает изменённое: повторный прогон не должен трогать 15 МБ аудио."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        monkeypatch.setenv("SUMMURAZE_OUTPUT_DIR", str(vault))
+        get_settings.cache_clear()
+        runner = CliRunner()
+        assert runner.invoke(app, ["run", str(lecture)]).exit_code == 0
+        files = sorted(vault.rglob("*.*"))
+        before = {p: p.stat().st_mtime_ns for p in files}
+        assert runner.invoke(app, ["run", str(lecture)]).exit_code == 0
+        assert {p: p.stat().st_mtime_ns for p in files} == before
+
+    def test_note_audio_disabled(
+        self, lecture: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SUMMURAZE_NOTE_AUDIO", "false")
+        get_settings.cache_clear()
+        result = CliRunner().invoke(app, ["run", str(lecture)])
+        assert result.exit_code == 0 and "аудио для заметки" not in result.output
+        [note] = (tmp_path / "data" / "notes").glob("*.md")
+        text = note.read_text(encoding="utf-8")
+        assert "[[" not in text and "`00:00:09`" in text
 
     def test_unknown_profile_is_a_clean_error(self, lecture: Path) -> None:
         result = CliRunner().invoke(app, ["run", str(lecture), "--profile", "nope"])

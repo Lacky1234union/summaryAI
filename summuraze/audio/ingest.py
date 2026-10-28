@@ -120,6 +120,31 @@ def _probe(source: Path) -> dict[str, Any]:
     return data
 
 
+def compress_for_note(wav: Path, output: Path, *, bitrate_kbps: int) -> None:
+    """Аудио для заметки Obsidian (#18): Opus в контейнере Ogg, моно.
+
+    Расширение `.ogg`, а не `.opus`: `.opus` Obsidian не считает аудио — ссылка на него не
+    резолвится и встроенный плеер не появляется; `.ogg` понимают и Obsidian, и Media Extended.
+    Источник — wav ингеста (16 kHz): для речи этого хватает, а исходник не перечитывается.
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+    partial = output.with_name(output.name + ".part")
+    try:
+        _run(
+            [
+                _binary("ffmpeg"),
+                *("-nostdin", "-hide_banner", "-loglevel", "error", "-y"),
+                *("-i", str(wav), "-map_metadata", "-1"),
+                *("-c:a", "libopus", "-b:a", f"{bitrate_kbps}k", "-application", "voip"),
+                *("-f", "ogg", str(partial)),
+            ],
+            what=f"ffmpeg не смог сжать аудио для заметки из {wav}",
+        )
+        partial.replace(output)
+    finally:
+        partial.unlink(missing_ok=True)
+
+
 def _run(cmd: list[str], *, what: str) -> str:
     result = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     if result.returncode != 0:

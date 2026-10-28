@@ -47,7 +47,7 @@ class PathsSettings(BaseSettings):
 
     @property
     def notes_dir(self) -> Path:
-        return self.output_dir or self.data_dir / "notes"
+        return (self.output_dir or self.data_dir / "notes").expanduser()
 
     @property
     def artifacts_dir(self) -> Path:
@@ -59,6 +59,22 @@ class PathsSettings(BaseSettings):
     def db_path(self) -> Path:
         """SQLite: состояние задач, история прогонов, стоимость."""
         return self.data_dir / "summuraze.sqlite"
+
+
+class NoteSettings(BaseSettings):
+    """Заметка Obsidian (#18): аудио и субтитры рядом с ней, для ссылок-таймкодов."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_NOTE_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # Сжатое аудио в хранилище (ADR 2026-10-26, вариант «б»): таймкоды Media Extended ведут в
+    # него, и оно же играет на телефоне. false — таймкоды остаются текстом.
+    audio: bool = True
+    # Opus для речи: 32 кбит/с ≈ 14 МБ на час — LiveSync переносит без проблем.
+    audio_bitrate_kbps: int = Field(default=32, ge=8, le=256)
+    # Подпапка заметок для аудио и .srt — чтобы в списке заметок не было вложений.
+    media_dir: str = "Записи"
 
 
 class ASRSettings(BaseSettings):
@@ -179,6 +195,7 @@ class Settings(BaseSettings):
 
     paths: PathsSettings = Field(default_factory=PathsSettings)
     vad: VADSettings = Field(default_factory=VADSettings)
+    note: NoteSettings = Field(default_factory=NoteSettings)
     asr: ASRSettings = Field(default_factory=ASRSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
 
