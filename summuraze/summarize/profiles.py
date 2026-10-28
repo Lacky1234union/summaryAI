@@ -80,6 +80,9 @@ class Profile:
     question: str
     document: type[BaseModel]
     max_tokens: int = 16_000
+    # Длинная запись (#21): карта по окнам и итог по ней. False — документ профиля по каждому
+    # окну, склеенный как есть (разметка `raw` пересказа не содержит, сводить нечего).
+    two_pass: bool = True
 
 
 _RULES = (
@@ -133,6 +136,7 @@ PROFILES: dict[str, Profile] = {
         ),
         question="Раздели транскрипт на смысловые блоки по схеме ответа.",
         document=RawDoc,
+        two_pass=False,
     ),
 }
 

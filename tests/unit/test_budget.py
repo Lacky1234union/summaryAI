@@ -18,8 +18,8 @@ from summuraze.pipeline import stages
 from summuraze.summarize import budget
 from summuraze.summarize.budget import (
     TEMPLATE_TOKENS,
-    TranscriptTooLong,
-    check_speech,
+    ContextTooSmall,
+    check_context,
     estimate_tokens,
     human_tokens,
     input_limit,
@@ -115,24 +115,22 @@ class TestStage:
         [call] = llm.sent
         assert call["max_tokens"] == 8192, "ответ — четверть контекста, а не 16k профиля"
 
-    def test_too_long_fails_before_sending(self, tmp_path: Path) -> None:
+    def test_too_long_goes_to_windows(self, tmp_path: Path) -> None:
         llm = Counted(8192)
-        with pytest.raises(TranscriptTooLong, match="#21") as err:
-            stages.build_summary(tmp_path, llm, _transcript(HOUR), get_profile("lecture"))
-        assert "в один запрос не влезает" in str(err.value) and "токенизатор сервера" in str(
-            err.value
-        )
-        assert llm.sent == [] and not any(tmp_path.iterdir())
+        plan = stages.build_summary(tmp_path, llm, _transcript(HOUR), get_profile("lecture"))
+        assert plan.mode == "windows" and plan.windows > 1 and plan.final == "map"
+        assert plan.describe().startswith(f"окнами — {plan.windows} шт.: ")
+        assert "итог — по карте: транскрипт целиком не влезает" in plan.describe()
+        assert len(llm.sent) == plan.windows + 1
 
 
-class TestSpeechCheck:
-    def test_two_hours_on_small_context_fail_early(self) -> None:
-        with pytest.raises(TranscriptTooLong, match="120 мин речи"):
-            check_speech(2 * HOUR, model="qwen-8b", context=8192, max_tokens=16_000)
+class TestContext:
+    def test_too_small_context_is_refused(self) -> None:
+        with pytest.raises(ContextTooSmall, match="хотя бы 4.1k"):
+            check_context(2048)
 
-    @pytest.mark.parametrize(("seconds", "context"), [(2 * HOUR, 1_000_000), (600, 8192)])
-    def test_passes_when_it_may_fit(self, seconds: float, context: int) -> None:
-        check_speech(seconds, model="m", context=context, max_tokens=16_000)
+    def test_small_local_context_is_enough(self) -> None:
+        check_context(8192)
 
 
 class TestTokenize:
@@ -191,20 +189,11 @@ class TestCLI:
         again = CliRunner().invoke(app, ["run", str(lecture)])
         assert "Саммари:" not in again.output, "из кэша — запроса не было"
 
-    def test_small_context_refuses_after_asr(
+    def test_too_small_context_refuses_before_asr(
         self, lecture: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("SUMMURAZE_LLM_CONTEXT", "800")
         get_settings.cache_clear()
         out = CliRunner().invoke(app, ["run", str(lecture)])
-        assert out.exit_code == 1
-        assert "в один запрос не влезает" in out.output and "summuraze transcribe" in out.output
-
-    def test_tiny_context_refuses_before_asr(
-        self, lecture: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("SUMMURAZE_LLM_CONTEXT", "100")
-        get_settings.cache_clear()
-        out = CliRunner().invoke(app, ["run", str(lecture)])
-        assert out.exit_code == 1 and "мин речи" in out.output
-        assert "распознавание" not in out.output, "час Whisper ради отказа не тратим"
+        assert out.exit_code == 1 and "SUMMURAZE_LLM_CONTEXT" in out.output
+        assert "[1/" not in out.output, "отказ до ингеста, не после часа Whisper"

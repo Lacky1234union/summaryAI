@@ -34,8 +34,15 @@ from summuraze.pipeline.memory import release_memory
 from summuraze.render.markdown import note_layout, publish_media, render_note
 from summuraze.store.artifacts import ArtifactKey, ArtifactStore
 from summuraze.store.db import Database, OutputKind
+from summuraze.summarize import windows
 from summuraze.summarize.base import check_llm, make_llm
-from summuraze.summarize.budget import Budget, check_speech, output_reserve
+from summuraze.summarize.budget import (
+    Budget,
+    check_context,
+    estimate_tokens,
+    input_limit,
+    output_reserve,
+)
 from summuraze.summarize.profiles import Profile, get_profile
 from summuraze.types import ASRProvider, AudioInfo, Interval, LLMProvider, LLMResult, Transcript
 
@@ -102,6 +109,7 @@ class Pipeline:
         glossary = load_glossary([terms, self.settings.asr.terms_file])
         if until in ("summarize", "render"):
             check_llm(self.settings.llm)
+            check_context(self.settings.llm.context)
         if until == "render":
             _check_output_dir(self.settings.paths.output_dir)
         return prof, glossary
@@ -181,14 +189,6 @@ class Pipeline:
                         "есть, понизь SUMMURAZE_VAD_THRESHOLD или выключи VAD"
                     )
             llm_cfg = self.settings.llm
-            if until in ("summarize", "render"):
-                check_speech(
-                    sum(i.duration for i in speech) if speech is not None else audio.duration,
-                    model=llm_cfg.model,
-                    context=llm_cfg.context,
-                    max_tokens=prof.max_tokens,
-                    single_pass_max=llm_cfg.single_pass_max,
-                )
 
             asr_cfg = self.settings.asr
             asr_key = ArtifactKey(
@@ -228,6 +228,10 @@ class Pipeline:
 
             # Ответ урезан малым контекстом — это другой запрос; при обычном ключ прежний.
             output = output_reserve(llm_cfg.context, prof.max_tokens)
+            # Версия окон — в ключе только у записей, которые могут пойти окнами (оценка с
+            # запасом вдвое): правка нарезки не должна сбрасывать кэш обычных лекций.
+            limit = input_limit(llm_cfg.context, prof.max_tokens, llm_cfg.single_pass_max)
+            long = estimate_tokens(stages.transcript_prefix(transcript)) > limit // 2
             summary_key = ArtifactKey(
                 "summarize",
                 stages.SUMMARY_VERSION,
@@ -239,6 +243,7 @@ class Pipeline:
                     "profile_version": prof.version,
                     "suspects": repetition.VERSION,
                     **({"max_tokens": output} if output != prof.max_tokens else {}),
+                    **({"windows": windows.VERSION} if long else {}),
                     **({"replacements": glossary.replacements} if glossary.replacements else {}),
                 },
             )
