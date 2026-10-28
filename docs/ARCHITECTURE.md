@@ -166,8 +166,8 @@ Summuraze/
 │   │   ├── profiles.py          промпты: созвон / лекция / встреча / семинар
 │   │   └── verify.py            проверка привязки к таймкодам
 │   ├── render/
-│   │   ├── markdown.py
-│   │   └── subtitles.py         SRT / VTT
+│   │   ├── markdown.py          заметка Obsidian: таймкоды-ссылки Media Extended, аудио и .srt рядом
+│   │   └── subtitles.py         .srt рядом с аудио — интерактивный транскрипт Media Extended
 │   └── store/
 │       ├── db.py                SQLite: состояние задач, история, стоимость
 │       └── artifacts.py         файлы стадий на диске

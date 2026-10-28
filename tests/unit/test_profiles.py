@@ -13,7 +13,7 @@ from pydantic import SecretStr
 from summuraze.config import LLMSettings
 from summuraze.pipeline import stages
 from summuraze.pipeline.stages import SummaryFormatError
-from summuraze.render.markdown import render_note, resolve_at
+from summuraze.render.markdown import NoteLayout, render_note, resolve_at
 from summuraze.summarize.echo import EchoLLM
 from summuraze.summarize.openai_compat import OpenAICompatLLM
 from summuraze.summarize.profiles import PROFILES, LectureDoc, RawDoc, get_profile
@@ -125,7 +125,7 @@ class TestResolveAt:
 def _render(tmp_path: Path, profile: str, document: dict[str, Any]) -> str:
     prof = get_profile(profile)
     note = render_note(
-        tmp_path / "n.md",
+        NoteLayout(tmp_path / "n.md", tmp_path / "Записи", "2026-10-27 lecture"),
         audio=AUDIO,
         transcript=TRANSCRIPT,
         summary=LLMResult(text="", model="m", usage=TokenUsage(input=0, output=0)),
