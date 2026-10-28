@@ -136,7 +136,8 @@ Summuraze/
 ├── summuraze/
 │   ├── config.py                pydantic-settings: единая точка валидации env
 │   ├── types.py                 контракты (см. выше)
-│   ├── cli.py                   typer: transcribe / summarize / run / record / bench; без аргументов — меню (этап 2.5)
+│   ├── cli.py                   typer: transcribe / run / record / log / gc; без аргументов — меню
+│   ├── menu.py                  меню (#38): зовёт те же функции CLI, настройки пишет в .env
 │   ├── pipeline/
 │   │   ├── stages.py            описание стадий и их зависимостей
 │   │   ├── orchestrator.py      прогон с кэшем, докладывает прогресс

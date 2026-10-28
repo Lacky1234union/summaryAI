@@ -5,11 +5,16 @@
 
 Импорты тяжёлых зависимостей (torch, faster-whisper) делаются ЛЕНИВО, внутри команд:
 `summuraze --help` должен отвечать за ~200 мс, а не грузить 6 секунд рантайм STT.
+
+Без аргументов — интерактивное меню (#38): оно зовёт эти же команды, своей логики конвейера
+у него нет.
 """
 
 from __future__ import annotations
 
 import shutil
+import sys
+import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
@@ -28,7 +33,6 @@ if TYPE_CHECKING:
 app = typer.Typer(
     name="summuraze",
     help="Саммаризатор лекций, семинаров, встреч и созвонов.",
-    no_args_is_help=True,
     add_completion=False,
 )
 
@@ -64,17 +68,19 @@ _STAGE_TITLES = {
 }
 
 
-@app.callback()
-def main() -> None:
-    """Саммаризатор лекций, семинаров, встреч и созвонов."""
-    import sys
-
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    """Саммаризатор лекций, семинаров, встреч и созвонов. Без команды — меню."""
     from loguru import logger
 
     # Предупреждения — человеку в терминал, без отметок времени и имён модулей. С новой строки:
     # они приходят посреди стадии, когда в строке уже стоит «[3/5] распознавание…».
     logger.remove()
     logger.add(sys.stderr, level="WARNING", format="\n<yellow>Внимание:</yellow> {message}")
+    if ctx.invoked_subcommand is None:
+        from summuraze.menu import menu
+
+        menu()
 
 
 @app.command()
@@ -155,6 +161,21 @@ def record(
     ] = False,
 ) -> None:
     """Записать микрофон и звук системы; по Ctrl+C — конспект в Obsidian."""
+    note = _record(name, profile=profile, lang=lang, terms=terms, mic_only=mic_only, no_run=no_run)
+    if note is not None:
+        typer.echo(f"Заметка: {note}")
+
+
+def _record(
+    name: str | None,
+    *,
+    profile: str = "lecture",
+    lang: str | None = None,
+    terms: Path | None = None,
+    mic_only: bool = False,
+    no_run: bool = False,
+) -> Path | None:
+    """Записать и, если не `no_run`, прогнать конвейер; вернуть путь заметки."""
     from summuraze.audio import record as rec
     from summuraze.pipeline.orchestrator import Pipeline
 
@@ -185,9 +206,8 @@ def record(
         raise typer.Exit(1)
     typer.echo(f"Сохранено: {path} ({path.stat().st_size / 2**20:.1f} МБ)")
     if no_run:
-        return
-    result = _run(path, until="render", stream=None, profile=profile, lang=lang, terms=terms)
-    typer.echo(f"Заметка: {result.note}")
+        return None
+    return _run(path, until="render", stream=None, profile=profile, lang=lang, terms=terms).note
 
 
 def _absorb_echoed_sigint(window: float = 2.0) -> None:
@@ -197,17 +217,17 @@ def _absorb_echoed_sigint(window: float = 2.0) -> None:
     import signal
     import time
 
-    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # Вернуть именно обычный обработчик, а не «предыдущий»: `_record_loop` уже поставил SIG_IGN,
+    # и с ним конвейер после записи (и меню после неё) не прерывался бы никогда.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         time.sleep(window)
     finally:
-        signal.signal(signal.SIGINT, previous)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
 
 
 def _record_loop(path: Path, sources: list[Source], bitrate: int, silence_minutes: float) -> bool:
     """Записывать до Ctrl+C или авто-стопа; True — остановил человек."""
-    import sys
-
     from summuraze.audio import record as rec
 
     watch = rec.SilenceWatch(silence_minutes)
@@ -368,19 +388,54 @@ def _run(
 ) -> RunResult:
     from summuraze.pipeline.orchestrator import Pipeline
 
-    with _clean_errors(), Pipeline(_settings(lang), on_event=_print_event) as pipeline:
-        return pipeline.run(source, until=until, stream=stream, profile=profile, terms=terms)
+    try:
+        with _clean_errors(), Pipeline(_settings(lang), on_event=_print_event) as pipeline:
+            return pipeline.run(source, until=until, stream=stream, profile=profile, terms=terms)
+    finally:
+        # Стадия упала или прервана — секундомер не должен тикать поверх сообщения об ошибке.
+        if _print_event.halt():
+            typer.echo("")
 
 
-def _print_event(e: StageEvent) -> None:
-    title = _STAGE_TITLES[e.stage]
-    prefix = f"[{e.index}/{e.total}] {title}"
-    if e.status == "start":
-        typer.echo(f"{prefix}…", nl=False)
-    elif e.status == "cached":
-        typer.echo(" из кэша")
-    else:
-        typer.echo(f" {e.seconds:.1f} с")
+class _StageProgress:
+    """Строка стадии. В терминале — с секундомером: распознавание идёт десятки минут, и строка
+    без движения выглядит зависшей (#38). В pipe и логе — только итог, без перерисовки."""
+
+    def __init__(self) -> None:
+        self._stop = threading.Event()
+        self._ticker: threading.Thread | None = None
+
+    def __call__(self, e: StageEvent) -> None:
+        prefix = f"[{e.index}/{e.total}] {_STAGE_TITLES[e.stage]}"
+        if e.status == "start":
+            typer.echo(f"{prefix}…", nl=False)
+            if sys.stdout.isatty():
+                self._stop.clear()
+                self._ticker = threading.Thread(target=self._tick, args=(prefix,), daemon=True)
+                self._ticker.start()
+            return
+        tty = self.halt()
+        tail = "из кэша" if e.status == "cached" else f"{e.seconds:.1f} с"
+        # \033[K — стереть секундомер, если итог короче него.
+        typer.echo(f"\r{prefix}… {tail}\033[K" if tty else f" {tail}")
+
+    def _tick(self, prefix: str) -> None:
+        elapsed = 0
+        while not self._stop.wait(1):
+            elapsed += 1
+            m, s = divmod(elapsed, 60)
+            typer.echo(f"\r{prefix}… {m:02d}:{s:02d}", nl=False)
+
+    def halt(self) -> bool:
+        if self._ticker is None:
+            return False
+        self._stop.set()
+        self._ticker.join()
+        self._ticker = None
+        return True
+
+
+_print_event = _StageProgress()
 
 
 if __name__ == "__main__":
