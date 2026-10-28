@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from summuraze.asr.base import ASRModelMissing
 from summuraze.asr.timeline import SpeechTimeline
 from summuraze.audio.wav import SAMPLE_RATE, read_pcm
 from summuraze.types import Interval, Segment, Transcript, Word
@@ -65,12 +66,23 @@ class FasterWhisperASR:
         from faster_whisper import WhisperModel
 
         self.model_name = cfg.model
-        self._model = WhisperModel(
-            cfg.model,
-            device=cfg.device,
-            compute_type=cfg.compute_type,
-            cpu_threads=cfg.threads or physical_cores(),
-        )
+        try:
+            self._model = WhisperModel(
+                cfg.model,
+                device=cfg.device,
+                compute_type=cfg.compute_type,
+                cpu_threads=cfg.threads or physical_cores(),
+                # --local-only (#20): только с диска. Скачивание само по себе транскрипт не
+                # увозит, но «ни одного сетевого запроса» — это ни одного.
+                local_files_only=cfg.local_only,
+            )
+        except Exception as e:
+            if not cfg.local_only:
+                raise
+            raise ASRModelMissing(
+                f"модели {cfg.model!r} нет на диске, а --local-only запрещает её скачать. "
+                "Запусти один раз без --local-only — модель скачается и останется в кэше"
+            ) from e
 
     def transcribe(
         self,

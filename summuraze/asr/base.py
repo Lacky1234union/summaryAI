@@ -13,6 +13,10 @@ from summuraze.config import ASRSettings
 from summuraze.types import ASRProvider
 
 
+class ASRModelMissing(RuntimeError):
+    """Модель не скачана, а `--local-only` запрещает её скачать (#20)."""
+
+
 def make_asr(settings: ASRSettings) -> ASRProvider:
     if settings.provider == "echo":
         from summuraze.asr.echo import EchoASR

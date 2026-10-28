@@ -79,6 +79,13 @@ _MIGRATIONS: list[str] = [
         PRIMARY KEY (recording_id, path)
     );
     """,
+    # #20: согласие отправлять транскрипт на внешний хост — спрашивается один раз на хост.
+    """
+    CREATE TABLE consents (
+        host       TEXT PRIMARY KEY,
+        granted_at TEXT NOT NULL
+    );
+    """,
 ]
 
 OutputKind = Literal["note", "audio", "subtitles"]
@@ -93,10 +100,23 @@ class RunRow:
     status: RunStatus
     error: str | None
     asr_model: str | None
+    llm_provider: str | None
     llm_model: str | None
+    input_tokens: int | None
+    output_tokens: int | None
+    cached_tokens: int | None
     cost_usd: float | None
+    duration: float | None  # длительность записи
     stages_total: int
     stages_cached: int
+
+    @property
+    def seconds(self) -> float | None:
+        """Сколько шёл прогон."""
+        if self.finished_at is None:
+            return None
+        started = datetime.fromisoformat(self.started_at)
+        return (datetime.fromisoformat(self.finished_at) - started).total_seconds()
 
 
 @dataclass(frozen=True)
@@ -273,7 +293,8 @@ class Database:
         rows = self._conn.execute(
             """
             SELECT r.id, rec.path AS source, r.started_at, r.finished_at, r.status, r.error,
-                   r.asr_model, r.llm_model, r.cost_usd,
+                   r.asr_model, r.llm_provider, r.llm_model, r.input_tokens, r.output_tokens,
+                   r.cached_tokens, r.cost_usd, rec.duration,
                    COUNT(s.id) AS stages_total, COALESCE(SUM(s.cached), 0) AS stages_cached
             FROM runs r
             JOIN recordings rec ON rec.id = r.recording_id
@@ -285,6 +306,18 @@ class Database:
             (limit,),
         ).fetchall()
         return [RunRow(**dict(row)) for row in rows]
+
+    # ── Согласие на отправку наружу ─────────────────────────────────────────
+
+    def has_consent(self, host: str) -> bool:
+        row = self._conn.execute("SELECT 1 FROM consents WHERE host = ?", (host,)).fetchone()
+        return row is not None
+
+    def grant_consent(self, host: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO consents (host, granted_at) VALUES (?, ?)", (host, _now())
+            )
 
 
 def _now() -> str:

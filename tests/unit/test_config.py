@@ -100,13 +100,37 @@ class TestLocalOnly:
         monkeypatch.setenv("SUMMURAZE_LOCAL_ONLY", "true")
         monkeypatch.setenv("SUMMURAZE_LLM_PROVIDER", "openai-compat")
         monkeypatch.setenv("SUMMURAZE_LLM_BASE_URL", "https://api.deepseek.com/v1")
-        with pytest.raises(ValidationError, match="смотрит наружу"):
+        with pytest.raises(ValidationError, match="саммари уходит наружу"):
             Settings()
 
     def test_local_only_with_local_llm_is_fine(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SUMMURAZE_LOCAL_ONLY", "true")
         monkeypatch.setenv("SUMMURAZE_LLM_BASE_URL", "http://127.0.0.1:8080/v1")
-        assert Settings().local_only is True
+        s = Settings()
+        assert s.local_only and s.llm.local_only and s.asr.local_only, "запрет доходит до фабрик"
+
+    def test_restricted_checks_like_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--local-only из CLI — та же проверка, что из .env."""
+        monkeypatch.setenv("SUMMURAZE_LLM_PROVIDER", "openai-compat")
+        with pytest.raises(ValueError, match="уходит наружу"):
+            Settings().restricted()
+        monkeypatch.setenv("SUMMURAZE_LLM_BASE_URL", "http://localhost:8080/v1")
+        assert Settings().restricted().asr.local_only
+
+    @pytest.mark.parametrize(
+        ("url", "local"),
+        [
+            ("http://127.0.0.1:8080/v1", True),
+            ("http://localhost:8080/v1", True),
+            ("http://[::1]:8080/v1", True),
+            ("https://openrouter.ai/api/v1", False),
+            ("https://openrouter.ai/api/v1?h=localhost", False),
+            ("https://127.0.0.1.evil.com/v1", False),
+            ("https://localhost.evil.com/v1", False),
+        ],
+    )
+    def test_is_local_by_host_not_substring(self, url: str, local: bool) -> None:
+        assert LLMSettings(provider="openai-compat", base_url=url).is_local is local
 
     def test_remote_llm_without_local_only_is_fine(self, monkeypatch: pytest.MonkeyPatch) -> None:
         assert Settings().local_only is False
