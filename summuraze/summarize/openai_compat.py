@@ -65,6 +65,7 @@ class OpenAICompatLLM:
         self._base_url = cfg.base_url.rstrip("/")
         self._local = cfg.is_local
         self._openrouter = OPENROUTER_HOST in self._base_url
+        self._quantizations = cfg.openrouter_quantizations
         headers = {"Content-Type": "application/json"}
         key = cfg.api_key.get_secret_value()
         if key:
@@ -101,9 +102,14 @@ class OpenAICompatLLM:
             }
         if self._openrouter:
             body["usage"] = {"include": True}  # вернуть списанную сумму в ответе
+            routing: dict[str, Any] = {}
             if schema is not None:
                 # Не отдавать запрос провайдеру, который схему молча проигнорирует.
-                body["provider"] = {"require_parameters": True}
+                routing["require_parameters"] = True
+            if self._quantizations:
+                routing["quantizations"] = self._quantizations
+            if routing:
+                body["provider"] = routing
         at = datetime.now(UTC)
         data = self._post(body)
         try:

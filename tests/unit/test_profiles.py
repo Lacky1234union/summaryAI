@@ -234,5 +234,40 @@ def test_adapter_sends_schema(monkeypatch: pytest.MonkeyPatch) -> None:
         "strict": True,
         "schema": schema,
     }
-    assert with_schema["provider"] == {"require_parameters": True}
-    assert "response_format" not in without and "provider" not in without
+    quant = ["fp8", "bf16", "fp16", "fp32", "unknown"]
+    assert with_schema["provider"] == {"require_parameters": True, "quantizations": quant}
+    assert "response_format" not in without and without["provider"] == {"quantizations": quant}
+
+
+def test_quantization_filter_can_be_disabled() -> None:
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    llm = OpenAICompatLLM(
+        LLMSettings(api_key=SecretStr("k"), openrouter_quantizations=[]),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    llm.complete(system="s", prefix="p", question="q", max_tokens=10)
+    assert "provider" not in sent[0]
+
+
+def test_repeated_thoughts_rendered_once(tmp_path: Path) -> None:
+    """Сбойный провайдер копировал тезисы во все разделы — в заметке мысль только один раз."""
+    same = _claim("Фурье раскладывает сигнал на гармоники.", "00:00:12")
+    doc = {
+        **LECTURE,
+        "tldr": [same, same],
+        "sections": [{"title": "Фурье", "at": "00:00:00", "theses": [same]}],
+        "examples": [same],
+        "reading": [_claim("ФУРЬЕ раскладывает сигнал на гармоники", "00:00:12")],
+        "qa": [LECTURE["qa"][0], LECTURE["qa"][0]],
+        "glossary": [LECTURE["glossary"][0], LECTURE["glossary"][0]],
+        "unclear": [],
+    }
+    text = _render(tmp_path, "lecture", doc)
+    assert text.count("раскладывает сигнал на гармоники") == 2, "тезис + строка транскрипта"
+    assert "## Формулы и примеры" not in text and "## Что почитать" not in text
+    assert text.count("**Вопрос:**") == 1 and text.count("**Гармоника**") == 1
