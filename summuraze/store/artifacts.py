@@ -76,7 +76,11 @@ class ArtifactStore:
         self.root = root
 
     def path(self, key: ArtifactKey) -> Path:
-        return self.root / key.stage / key.digest[:2] / key.digest
+        return self.located(key.stage, key.digest)
+
+    def located(self, stage: str, digest: str) -> Path:
+        """Каталог артефакта по ключу из истории прогонов, без самого `ArtifactKey`."""
+        return self.root / stage / digest[:2] / digest
 
     def get(self, key: ArtifactKey) -> Path | None:
         """Каталог готового артефакта или `None`.
@@ -153,7 +157,7 @@ class ArtifactStore:
                     if not expired:
                         continue
                     removed += 1
-                    freed += _size(entry)
+                    freed += tree_size(entry)
                     if not dry_run:
                         shutil.rmtree(entry, ignore_errors=True)
                 if not dry_run and not any(bucket.iterdir()):
@@ -161,5 +165,5 @@ class ArtifactStore:
         return GCResult(removed, freed)
 
 
-def _size(path: Path) -> int:
+def tree_size(path: Path) -> int:
     return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())

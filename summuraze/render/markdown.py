@@ -254,3 +254,26 @@ def _write_if_changed(path: Path, data: bytes) -> None:
     tmp = path.with_name(path.name + ".part")
     tmp.write_bytes(data)
     tmp.replace(path)
+
+
+def detach_audio(note: str, media: str, removed: str) -> str:
+    """Заметка без аудио (#49): таймкоды-ссылки становятся текстом, как при выключенном аудио,
+    плеер — пометкой, когда и почему аудио удалено. Мёртвая ссылка выглядела бы как поломка."""
+    name = re.escape(media)
+    note = re.sub(rf"\[\[{name}#t=[\d.]+\|([^\]]+)\]\]", r"`\1`", note)
+    note = re.sub(
+        rf"^!\[\[{name}\]\]$",
+        f"> [!info] Аудио удалено {removed} — истёк срок хранения записи.",
+        note,
+        flags=re.MULTILINE,
+    )
+    return re.sub(
+        rf'^audio: "\[\[{name}\]\]"$',
+        f"audio_removed: {json.dumps(removed)}",
+        note,
+        flags=re.MULTILINE,
+    )
+
+
+def rewrite_note(path: Path, text: str) -> None:
+    _write_if_changed(path, text.encode("utf-8"))

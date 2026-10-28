@@ -33,7 +33,7 @@ from summuraze.pipeline import stages
 from summuraze.pipeline.memory import release_memory
 from summuraze.render.markdown import note_layout, publish_media, render_note
 from summuraze.store.artifacts import ArtifactKey, ArtifactStore
-from summuraze.store.db import Database
+from summuraze.store.db import Database, OutputKind
 from summuraze.summarize.base import check_llm, make_llm
 from summuraze.summarize.profiles import Profile, get_profile
 from summuraze.types import ASRProvider, AudioInfo, Interval, LLMProvider, LLMResult, Transcript
@@ -62,6 +62,7 @@ class RunResult:
     document: BaseModel | None = None
     note: Path | None = None
     cached: dict[str, bool] | None = None
+    recording_id: int | None = None
 
 
 class Pipeline:
@@ -148,7 +149,7 @@ class Pipeline:
                 source,
             )
             self.db.set_duration(recording_id, audio.duration)
-            result = RunResult(run_id=run_id, audio=audio, cached=cached)
+            result = RunResult(run_id=run_id, audio=audio, cached=cached, recording_id=recording_id)
             if until == "ingest":
                 self.db.finish_run(run_id, "done")
                 return result
@@ -264,6 +265,7 @@ class Pipeline:
                 layout = note_layout(
                     self.settings.paths.notes_dir, source, prof.name, note_cfg.media_dir
                 )
+                media = publish_media(layout, note_audio, transcript)
                 result.note = render_note(
                     layout,
                     audio=audio,
@@ -271,8 +273,16 @@ class Pipeline:
                     summary=summary,
                     document=document,
                     profile=prof.name,
-                    media=publish_media(layout, note_audio, transcript),
+                    media=media,
                 )
+                # Срок хранения (#49) найдёт аудио и заметку по БД, а не угадыванием имён.
+                outputs: list[tuple[OutputKind, Path]] = [("note", result.note)]
+                if media is not None:
+                    outputs += [
+                        ("audio", layout.audio),
+                        ("subtitles", layout.subtitles(transcript.language)),
+                    ]
+                self.db.record_outputs(recording_id, outputs)
                 seconds = time.monotonic() - started
                 cached["render"] = False
                 self.db.record_stage(run_id, "render", "-", cached=False, seconds=seconds)

@@ -171,7 +171,8 @@ Summuraze/
 │   │   └── subtitles.py         .srt рядом с аудио — интерактивный транскрипт Media Extended
 │   └── store/
 │       ├── db.py                SQLite: состояние задач, история, стоимость
-│       └── artifacts.py         файлы стадий на диске
+│       ├── artifacts.py         файлы стадий на диске
+│       └── retention.py         срок хранения: аудио уходит, заметки и транскрипты остаются
 └── tests/
     ├── fixtures/                короткие аудио-эталоны + reference-транскрипты
     ├── unit/

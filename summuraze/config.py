@@ -239,6 +239,16 @@ class Settings(BaseSettings):
     # Полный запрет сети на уровне фабрики провайдеров — #20; здесь ловим противоречие раньше,
     # чтобы оно не всплыло после часа транскрибации.
     local_only: bool = False
+    # Срок хранения аудио своих записей в днях (#49): по истечении оригинал, кэш wav и аудио
+    # в хранилище удаляются в конце прогона; заметки и транскрипты остаются. Пусто — не удалять.
+    retention_days: float | None = Field(default=None, gt=0)
+
+    @field_validator("retention_days", mode="before")
+    @classmethod
+    def _blank_retention_means_forever(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     @model_validator(mode="after")
     def _local_only_forbids_remote_llm(self) -> Settings:

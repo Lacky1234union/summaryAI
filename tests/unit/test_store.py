@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from summuraze.store.artifacts import MANIFEST, ArtifactKey, ArtifactStore
-from summuraze.store.db import Database
+from summuraze.store.db import _MIGRATIONS, Database
 from summuraze.types import TokenUsage
 
 
@@ -215,9 +215,25 @@ class TestDatabase:
         Database(path).close()
         conn = sqlite3.connect(path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == len(_MIGRATIONS)
         finally:
             conn.close()
+
+    def test_old_schema_upgrades_keeping_history(self, tmp_path: Path) -> None:
+        """БД с прошлых прогонов (схема 1) получает таблицу выходов (#49), история цела."""
+        path = tmp_path / "db.sqlite"
+        conn = sqlite3.connect(path)
+        conn.executescript(_MIGRATIONS[0])
+        conn.execute(
+            "INSERT INTO recordings (sha256, path, size, mtime_ns, first_seen)"
+            " VALUES ('h', '/x.mka', 1, 1, '2026-10-01T00:00:00+00:00')"
+        )
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+        conn.close()
+        with Database(path) as db:
+            [rec] = db.unpruned_recordings()
+            assert rec.path == "/x.mka" and db.outputs(rec.id) == []
 
 
 def test_cli_gc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
