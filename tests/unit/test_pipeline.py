@@ -71,7 +71,7 @@ def test_full_run_produces_note(lecture: Path) -> None:
         result = p.run(lecture)
     assert result.note is not None and result.note.is_file()
     text = result.note.read_text(encoding="utf-8")
-    assert "Эхо-саммари" in text
+    assert "llm_model: echo" in text and "## Транскрипт" in text
     assert result.transcript is not None
     first = result.transcript.segments[0]
     assert f"`{fmt_timecode(first.start)}` эхо-сегмент 1" in text
@@ -393,3 +393,14 @@ def test_glossary_terms_reach_asr_and_replacements_skip_it(lecture: Path, tmp_pa
     assert again.cached is not None and again.cached["summarize"] is False
     assert again.transcript is not None
     assert again.transcript.segments[0].text.startswith("echo-сегмент")
+
+
+def test_other_profile_gets_own_note_and_reuses_asr(lecture: Path) -> None:
+    counting = Counting()
+    with _pipeline(counting) as p:
+        main = p.run(lecture)
+        raw = p.run(lecture, profile="raw")
+    assert main.note is not None and raw.note is not None
+    assert raw.note.name == main.note.name.replace(".md", " (raw).md")
+    assert main.note.is_file(), "сырой профиль не затирает конспект"
+    assert (counting.asr, counting.llm) == (1, 2)

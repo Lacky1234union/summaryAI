@@ -14,13 +14,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from summuraze.audio.ingest import ingest
 from summuraze.audio.vad import detect_speech
 from summuraze.config import VADSettings
 from summuraze.render.markdown import fmt_timecode
 from summuraze.summarize.profiles import Profile
+from summuraze.summarize.schema import strict_schema
 from summuraze.types import (
     ASRProvider,
     AudioInfo,
@@ -35,7 +36,8 @@ VAD_VERSION = 1
 # 2: ASR получает интервалы речи от VAD (#10).
 ASR_VERSION = 2
 # 2: сомнительные сегменты помечены в префиксе, правило про пометку — в system (#12).
-SUMMARY_VERSION = 2
+# 3: ответ — JSON по схеме профиля, в артефакте разобранный документ (#17).
+SUMMARY_VERSION = 3
 
 _AUDIO = "audio.wav"
 _AUDIO_INFO = "audio.json"
@@ -110,17 +112,35 @@ def transcript_prefix(transcript: Transcript) -> str:
     )
 
 
+class SummaryFormatError(RuntimeError):
+    """Модель ответила не по схеме профиля — такой ответ в кэш не кладём."""
+
+
 def build_summary(out: Path, llm: LLMProvider, transcript: Transcript, profile: Profile) -> None:
     result = llm.complete(
         system=f"{profile.system}\n\n{SUSPECT_RULE}",
         prefix=transcript_prefix(transcript),
         question=profile.question,
-        max_tokens=8000,
+        max_tokens=profile.max_tokens,
+        schema=strict_schema(profile.document),
     )
-    payload = {"profile": profile.name, "result": result.model_dump()}
+    try:
+        document = profile.document.model_validate_json(result.text)
+    except ValidationError as e:
+        raise SummaryFormatError(
+            f"модель {result.model} ответила не по схеме профиля {profile.name!r} "
+            f"(обрезан ответ или сервер не поддерживает structured outputs): "
+            f"{e.errors()[0]['msg']}; начало ответа: {result.text[:200]!r}"
+        ) from e
+    payload = {
+        "profile": profile.name,
+        "document": document.model_dump(),
+        "result": result.model_dump(),
+    }
     (out / _SUMMARY).write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
 
 
-def load_summary(artifact: Path) -> LLMResult:
+def load_summary(artifact: Path, profile: Profile) -> tuple[LLMResult, BaseModel]:
     payload = json.loads((artifact / _SUMMARY).read_text(encoding="utf-8"))
-    return LLMResult.model_validate(payload["result"])
+    result = LLMResult.model_validate(payload["result"])
+    return result, profile.document.model_validate(payload["document"])

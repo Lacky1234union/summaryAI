@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
+from summuraze.summarize.schema import empty_document
 from summuraze.types import LLMResult, TokenUsage
 
 
@@ -21,12 +25,16 @@ class EchoLLM:
         prefix: str,
         question: str,
         max_tokens: int,
+        schema: dict[str, Any] | None = None,
     ) -> LLMResult:
         lines = [ln for ln in prefix.splitlines() if ln.strip()]
         text = (
             f"Эхо-саммари: транскрипт из {len(lines)} строк, {len(prefix)} символов.\n"
             f"Первая строка: {lines[0] if lines else '—'}"
         )
+        if schema is not None:
+            # Пустой, но валидный документ: конвейер и рендер проходят без модели.
+            text = json.dumps(empty_document(schema), ensure_ascii=False)
         return LLMResult(
             text=text,
             model=self.model,

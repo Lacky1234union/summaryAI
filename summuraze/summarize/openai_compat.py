@@ -82,6 +82,7 @@ class OpenAICompatLLM:
         prefix: str,
         question: str,
         max_tokens: int,
+        schema: dict[str, Any] | None = None,
     ) -> LLMResult:
         body = {
             "model": self.model,
@@ -93,8 +94,16 @@ class OpenAICompatLLM:
             "temperature": 0.3,
             "stream": False,
         }
+        if schema is not None:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "document", "strict": True, "schema": schema},
+            }
         if self._openrouter:
             body["usage"] = {"include": True}  # вернуть списанную сумму в ответе
+            if schema is not None:
+                # Не отдавать запрос провайдеру, который схему молча проигнорирует.
+                body["provider"] = {"require_parameters": True}
         at = datetime.now(UTC)
         data = self._post(body)
         try:
