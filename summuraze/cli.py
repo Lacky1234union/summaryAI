@@ -28,7 +28,7 @@ from summuraze import __version__
 if TYPE_CHECKING:
     from summuraze.audio.record import Source
     from summuraze.config import Settings
-    from summuraze.pipeline.orchestrator import RunResult, StageEvent, StageName
+    from summuraze.pipeline.orchestrator import Pipeline, RunResult, StageEvent, StageName
 
 app = typer.Typer(
     name="summuraze",
@@ -336,6 +336,81 @@ def gc(
     typer.echo(f"{verb}: {result.removed} артефактов, {result.freed_bytes / 2**20:.1f} МБ")
 
 
+@app.command()
+def prune(
+    before: Annotated[
+        str | None, typer.Option(help="Удалить аудио записей, сделанных до этой даты: 2026-10-01")
+    ] = None,
+    older_than: Annotated[
+        str | None, typer.Option("--older-than", help="…или старше срока: 30d, 2w")
+    ] = None,
+    include_foreign: Annotated[
+        bool,
+        typer.Option(
+            "--include-foreign", help="Удалять и оригиналы не из SUMMURAZE_RECORD_DIR (чужие файлы)"
+        ),
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Удалить; без флага — только показать")
+    ] = False,
+) -> None:
+    """Удалить аудио старых записей; заметки, транскрипты и история остаются."""
+    from summuraze.config import get_settings
+    from summuraze.store import retention
+    from summuraze.store.artifacts import ArtifactStore
+    from summuraze.store.db import Database
+
+    settings = get_settings()
+    with _clean_errors():
+        border = retention.cutoff(
+            before=before,
+            older_than=older_than,
+            retention_days=settings.retention_days,
+            now=datetime.now().astimezone(),
+        )
+    with Database(settings.paths.db_path) as db:
+        pruned = retention.plan(
+            db,
+            ArtifactStore(settings.paths.artifacts_dir),
+            settings.record.directory,
+            border,
+            include_foreign=include_foreign,
+        )
+        if not pruned.victims:
+            typer.echo(f"Записей до {border:%Y-%m-%d %H:%M} с аудио нет — удалять нечего.")
+            return
+        typer.echo(
+            f"Записей до {border:%Y-%m-%d %H:%M}: {len(pruned.victims)}, "
+            f"аудио {retention.human_size(pruned.size)}"
+        )
+        for v in pruned.victims:
+            kinds = ", ".join(sorted({_PRUNE_KINDS[i.kind] for i in v.items}))
+            typer.echo(
+                f"  {v.recorded:%Y-%m-%d}  {v.name}  {retention.human_size(v.size)}  ({kinds})"
+            )
+        if pruned.foreign_kept:
+            typer.echo(
+                f"Оригиналы не из {settings.record.directory} не трогаю "
+                f"({pruned.foreign_kept}) — --include-foreign, чтобы удалить и их."
+            )
+        if not yes:
+            typer.echo("Ничего не удалено. Удалить — тот же вызов с --yes.")
+            return
+        notes = retention.apply(pruned, db, today=datetime.now().date())
+    typer.echo(
+        f"Удалено {retention.human_size(pruned.size)}; заметок обновлено: {notes} "
+        "(таймкоды теперь текстом)."
+    )
+
+
+_PRUNE_KINDS = {
+    "original": "оригинал",
+    "cache": "кэш",
+    "audio": "аудио в хранилище",
+    "subtitles": "субтитры",
+}
+
+
 def _local_time(iso_utc: str) -> str:
     # В БД — UTC (сравнимо между машинами), человеку — местное время.
     return datetime.fromisoformat(iso_utc).astimezone().strftime("%Y-%m-%d %H:%M")
@@ -390,11 +465,40 @@ def _run(
 
     try:
         with _clean_errors(), Pipeline(_settings(lang), on_event=_print_event) as pipeline:
-            return pipeline.run(source, until=until, stream=stream, profile=profile, terms=terms)
+            result = pipeline.run(source, until=until, stream=stream, profile=profile, terms=terms)
+            if until == "render":
+                _auto_prune(pipeline, keep=result.recording_id)
+            return result
     finally:
         # Стадия упала или прервана — секундомер не должен тикать поверх сообщения об ошибке.
         if _print_event.halt():
             typer.echo("")
+
+
+def _auto_prune(pipeline: Pipeline, *, keep: int | None) -> None:
+    """Срок хранения (#49) — в конце прогона, только свои записи: чужой файл пользователь
+    удаляет сам или явным `prune --include-foreign`."""
+    from summuraze.store import retention
+
+    settings = pipeline.settings
+    if settings.retention_days is None:
+        return
+    border = retention.cutoff(
+        before=None,
+        older_than=None,
+        retention_days=settings.retention_days,
+        now=datetime.now().astimezone(),
+    )
+    pruned = retention.plan(
+        pipeline.db, pipeline.store, settings.record.directory, border, keep=keep
+    )
+    if not pruned.victims:
+        return
+    retention.apply(pruned, pipeline.db, today=datetime.now().date())
+    typer.echo(
+        f"Срок хранения {settings.retention_days:g} дн.: удалено аудио "
+        f"{len(pruned.victims)} записей, {retention.human_size(pruned.size)}."
+    )
 
 
 class _StageProgress:

@@ -67,7 +67,21 @@ _MIGRATIONS: list[str] = [
     );
     CREATE INDEX stage_runs_run ON stage_runs (run_id);
     """,
+    # #49: что рендер положил в хранилище — чтобы срок хранения нашёл аудио и заметки записи,
+    # даже если папку заметок потом поменяли. pruned_at — аудио записи уже удалено.
+    """
+    ALTER TABLE recordings ADD COLUMN pruned_at TEXT;
+
+    CREATE TABLE outputs (
+        recording_id INTEGER NOT NULL REFERENCES recordings (id),
+        kind         TEXT NOT NULL CHECK (kind IN ('note', 'audio', 'subtitles')),
+        path         TEXT NOT NULL,
+        PRIMARY KEY (recording_id, path)
+    );
+    """,
 ]
+
+OutputKind = Literal["note", "audio", "subtitles"]
 
 
 @dataclass(frozen=True)
@@ -83,6 +97,14 @@ class RunRow:
     cost_usd: float | None
     stages_total: int
     stages_cached: int
+
+
+@dataclass(frozen=True)
+class RecordingRow:
+    id: int
+    path: str
+    first_seen: str
+    duration: float | None
 
 
 class Database:
@@ -145,6 +167,50 @@ class Database:
         with self._conn:
             self._conn.execute(
                 "UPDATE recordings SET duration = ? WHERE id = ?", (duration, recording_id)
+            )
+
+    def record_outputs(self, recording_id: int, outputs: list[tuple[OutputKind, Path]]) -> None:
+        """Запомнить, что рендер положил в хранилище. Новый рендер — аудио снова есть."""
+        with self._conn:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO outputs (recording_id, kind, path) VALUES (?, ?, ?)",
+                [(recording_id, kind, str(path.resolve())) for kind, path in outputs],
+            )
+            self._conn.execute(
+                "UPDATE recordings SET pruned_at = NULL WHERE id = ?", (recording_id,)
+            )
+
+    def outputs(self, recording_id: int) -> list[tuple[OutputKind, Path]]:
+        rows = self._conn.execute(
+            "SELECT kind, path FROM outputs WHERE recording_id = ? ORDER BY kind, path",
+            (recording_id,),
+        ).fetchall()
+        return [(row["kind"], Path(row["path"])) for row in rows]
+
+    def unpruned_recordings(self) -> list[RecordingRow]:
+        rows = self._conn.execute(
+            "SELECT id, path, first_seen, duration FROM recordings WHERE pruned_at IS NULL"
+            " ORDER BY first_seen"
+        ).fetchall()
+        return [RecordingRow(**dict(row)) for row in rows]
+
+    def stage_keys(self, recording_id: int, stages: tuple[str, ...]) -> set[tuple[str, str]]:
+        """`(стадия, ключ)` всех артефактов этих стадий, когда-либо собранных для записи."""
+        marks = ", ".join("?" * len(stages))
+        rows = self._conn.execute(
+            f"""
+            SELECT DISTINCT s.stage, s.key FROM stage_runs s
+            JOIN runs r ON r.id = s.run_id
+            WHERE r.recording_id = ? AND s.stage IN ({marks})
+            """,
+            (recording_id, *stages),
+        ).fetchall()
+        return {(row["stage"], row["key"]) for row in rows}
+
+    def mark_pruned(self, recording_id: int) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE recordings SET pruned_at = ? WHERE id = ?", (_now(), recording_id)
             )
 
     # ── Прогоны ─────────────────────────────────────────────────────────────
