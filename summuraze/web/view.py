@@ -49,6 +49,7 @@ class Card(BaseModel):
     duration: float | None
     pruned: bool
     status: Status | None  # None — запись зарегистрирована, прогонов не было
+    run_id: int | None
     stage: str | None
     stage_title: str | None
     stage_started_at: str | None
@@ -190,7 +191,7 @@ def audio_file(db: Database, store: ArtifactStore, recording_id: int) -> Path | 
 
 def _card(row: LatestRun) -> Card:
     status: Status | None = row.status
-    if status == "running" and not _alive(row.pid):
+    if status == "running" and not alive(row.pid):
         # Процесс убит (kill, выключили ноутбук) — finish_run не случился, статус так и остался.
         status = "interrupted"
     return Card(
@@ -201,6 +202,7 @@ def _card(row: LatestRun) -> Card:
         duration=row.duration,
         pruned=row.pruned_at is not None,
         status=status,
+        run_id=row.run_id,
         stage=row.stage,
         stage_title=STAGE_TITLES.get(row.stage or ""),
         stage_started_at=row.stage_started_at,
@@ -214,7 +216,7 @@ def _card(row: LatestRun) -> Card:
     )
 
 
-def _alive(pid: int | None) -> bool:
+def alive(pid: int | None) -> bool:
     if pid is None:
         return False  # прогон до миграции 4: живым он быть уже не может
     try:
