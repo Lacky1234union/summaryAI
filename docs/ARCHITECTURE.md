@@ -137,7 +137,7 @@ Summuraze/
 ├── summuraze/
 │   ├── config.py                pydantic-settings: единая точка валидации env
 │   ├── types.py                 контракты (см. выше)
-│   ├── cli.py                   typer: transcribe / run / record / log / gc; без аргументов — меню
+│   ├── cli.py                   typer: transcribe / run / record / log / gc / web; без аргументов — меню
 │   ├── menu.py                  меню (#38): зовёт те же функции CLI, настройки пишет в .env
 │   ├── pipeline/
 │   │   ├── stages.py            описание стадий и их зависимостей
@@ -172,8 +172,12 @@ Summuraze/
 │   │   ├── markdown.py          заметка Obsidian: таймкоды-ссылки Media Extended, аудио и .srt рядом
 │   │   ├── subtitles.py         реплики .srt/.vtt по словам: для Media Extended и для плеера
 │   │   └── export.py            transcribe → запись.json/.txt/.srt рядом с исходником
+│   ├── web/                     веб (#23): читает ту же SQLite и кэш, своей копии данных нет
+│   │   ├── view.py              записи и прогоны из БД, транскрипт и конспект из артефактов
+│   │   ├── app.py               FastAPI: JSON, звук с Range (перемотка), статика
+│   │   └── static/              одна страница на чистом JS: список, конспект, транскрипт, плеер
 │   └── store/
-│       ├── db.py                SQLite: состояние задач, история, стоимость
+│       ├── db.py                SQLite: состояние задач, история, стоимость, текущая стадия
 │       ├── artifacts.py         файлы стадий на диске
 │       └── retention.py         срок хранения: аудио уходит, заметки и транскрипты остаются
 └── tests/

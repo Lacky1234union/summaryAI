@@ -110,6 +110,11 @@ def resolve_at(at: str, transcript: Transcript) -> float | None:
     return starts[-1] if starts else float(t)
 
 
+def thought_key(text: str) -> str:
+    """Мысль без регистра и пунктуации: повтор по этому ключу в заметку не идёт."""
+    return " ".join(re.findall(r"\w+", text.lower()))
+
+
 @dataclass(frozen=True)
 class _Body:
     """Сборка тела заметки: транскрипт для привязки таймкодов и аудио для ссылок.
@@ -125,7 +130,7 @@ class _Body:
     seen: set[str] = field(default_factory=set)
 
     def fresh(self, text: str) -> bool:
-        key = " ".join(re.findall(r"\w+", text.lower()))
+        key = thought_key(text)
         if not key or key in self.seen:
             return False
         self.seen.add(key)

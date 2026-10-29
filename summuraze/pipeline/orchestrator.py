@@ -63,6 +63,16 @@ STAGES: tuple[StageName, ...] = (
     "audio",
     "render",
 )
+# Для человека: строка прогресса в терминале и статус в вебе (#23).
+STAGE_TITLES: dict[str, str] = {
+    "ingest": "ингест",
+    "vad": "поиск речи",
+    "asr": "распознавание",
+    "summarize": "саммари",
+    "verify": "проверка",
+    "audio": "аудио для заметки",
+    "render": "заметка",
+}
 
 
 @dataclass(frozen=True)
@@ -154,12 +164,14 @@ class Pipeline:
         active = [s for s in STAGES if not skipped.get(s)]
         total = active.index(until) + 1
         recording_id, source_hash = self.db.register_source(source)
-        run_id = self.db.start_run(recording_id)
+        summarizes = until in ("summarize", "verify", "audio", "render")
+        run_id = self.db.start_run(recording_id, profile=prof.name if summarizes else None)
         cached: dict[str, bool] = {}
         fresh: list[LLMResult] = []  # запросы к LLM этого прогона — для цены в `log`
 
         def stage(name: StageName, key: ArtifactKey, build: Callable[[Path], None]) -> Path:
             index = active.index(name) + 1
+            self.db.set_stage(run_id, name)
             self._on_event(StageEvent(name, index, total, "start"))
             started = time.monotonic()
             try:
@@ -343,6 +355,7 @@ class Pipeline:
                     note_audio = artifact / stages.NOTE_AUDIO
 
                 index = active.index("render") + 1
+                self.db.set_stage(run_id, "render")
                 self._on_event(StageEvent("render", index, total, "start"))
                 started = time.monotonic()
                 layout = note_layout(

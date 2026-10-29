@@ -34,6 +34,14 @@ def is_local_url(url: str) -> bool:
     return (urlparse(url).hostname or "") in _LOCAL_HOSTS
 
 
+def llm_destination(provider: str) -> str:
+    """Куда уехал транскрипт (#20): хост провайдера или «локально». `provider` — как в
+    `runs.llm_provider`: base_url или `echo`."""
+    if provider == "echo" or is_local_url(provider):
+        return "локально"
+    return urlparse(provider).hostname or provider
+
+
 class PathsSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SUMMURAZE_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
