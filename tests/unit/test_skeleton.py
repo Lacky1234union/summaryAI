@@ -51,3 +51,16 @@ def test_cli_starts_fast() -> None:
     elapsed = time.monotonic() - start
     assert result.returncode == 0, result.stderr.decode()
     assert elapsed < 3.0, f"CLI стартует {elapsed:.1f} с — похоже, тяжёлый импорт наверху"
+
+
+def test_cli_restores_ctrl_c_ignored_by_background_launch() -> None:
+    """Запуск в фоне (`cmd &`) наследует SIGINT = SIG_IGN — без возврата обработчика ни Ctrl+C,
+    ни «Остановить» в вебе прогон не останавливают (#64)."""
+    import signal
+
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        assert runner.invoke(app, ["version"]).exit_code == 0
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    finally:
+        signal.signal(signal.SIGINT, previous)

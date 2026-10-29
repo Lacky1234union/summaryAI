@@ -78,8 +78,13 @@ LangOpt = Annotated[
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
     """Саммаризатор лекций, семинаров, встреч и созвонов. Без команды — меню."""
+    import signal
+
     from loguru import logger
 
+    # Запущенному в фоне (`cmd &`, веб из скрипта) оболочка ставит SIGINT = SIG_IGN, и Python
+    # тогда своего обработчика не ставит: «Остановить» в вебе и `kill -INT` молча не работали бы.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     # Предупреждения — человеку в терминал, без отметок времени и имён модулей. С новой строки:
     # они приходят посреди стадии, когда в строке уже стоит «[3/5] распознавание…».
     logger.remove()
