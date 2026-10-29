@@ -102,6 +102,7 @@ def plan(
     *,
     max_tokens: int,
     single_pass_max: int | None = None,
+    what: str = "саммари",
 ) -> Budget:
     """`parts` — всё, что уйдёт в запрос: транскрипт, промпт профиля, вопрос."""
     text = "\n".join(parts)
@@ -117,7 +118,7 @@ def plan(
         output=output_reserve(context, max_tokens),
         exact=counted is not None,
     )
-    logger.info("саммари {}: {}", llm.model, budget.describe())
+    logger.info("{} {}: {}", what, llm.model, budget.describe())
     return budget
 
 

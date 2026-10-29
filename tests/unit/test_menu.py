@@ -72,7 +72,7 @@ def test_from_file_runs_pipeline_and_offers_note(
     result = runner.invoke(app, [], input="2\n1\n1\ny\n0\n")
     assert result.exit_code == 0, result.output
     assert "заметки.txt" not in result.output, "не-медиа в списке записей не показываем"
-    assert "[4/6] саммари" in result.output
+    assert "[4/7] саммари" in result.output
     [note] = (tmp_path / "data" / "notes").glob("*.md")
     assert f"Заметка: {note}" in result.output
     assert opened == [str(note)], "без хранилища — .md как есть"

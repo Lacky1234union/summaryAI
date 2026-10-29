@@ -181,7 +181,7 @@ class TestCLI:
         assert result.exit_code == 0, result.output
         recorded = tmp_path / "rec" / "пара 1.mka"
         assert _streams(recorded) == ["opus,микрофон", "opus,система"]
-        assert "Заметка:" in result.output and "[4/6] саммари" in result.output
+        assert "Заметка:" in result.output and "[4/7] саммари" in result.output
 
     def test_no_run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self._fake_inputs(monkeypatch)
