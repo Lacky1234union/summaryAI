@@ -21,11 +21,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from summuraze.render.markdown import fmt_timecode, resolve_at
 from summuraze.summarize.profiles import Claim, Question, Term
@@ -44,11 +45,12 @@ AFTER = 120.0
 UNCLEAR_NEAR = 30.0
 LOW_PROB = 0.4
 LOW_WORDS = 2
-# Сколько раз переспросить про утверждения, по которым судья промолчал: YandexGPT-8B ответила
-# про 2 из 14 и закончила ответ (2026-10-29).
+# Сколько раз переспросить про утверждения, по которым судья промолчал: Qwen3-4B на конспекте
+# YandexGPT ответила про 2 из 14 и закончила ответ (2026-10-29).
 RETRIES = 2
-# Вердикт — номер, слово, таймкод и короткая причина: десятки токенов на утверждение.
-TOKENS_PER_CLAIM = 64
+# Вердикт — номер, таймкод, слово и причина до NOTE_CHARS: на русском причина одна — до 50
+# токенов. 64 на утверждение обрезали ответ Qwen3-4B на 31-м из 31 (2026-10-29).
+TOKENS_PER_CLAIM = 96
 # Причина — в схеме ответа, а не только в промпте: Qwen3-4B на «да» писала в неё цитату из
 # транскрипта и раз зациклилась на тысячу символов (2026-10-29). Для llama.cpp схема — грамматика,
 # лимит жёсткий; API может его не соблюдать, поэтому длину режем и сами, а не валидацией.
@@ -195,6 +197,30 @@ def question(items: Sequence[ClaimRef]) -> str:
 
 def output_tokens(n: int) -> int:
     return TOKENS_PER_CLAIM * n + 256
+
+
+def parse(text: str) -> Verdicts | None:
+    """Ответ судьи → вердикты. Обрезанный лимитом ответ — не брак: целые вердикты из начала
+    берём, про остальные судью переспросят. `None` — в ответе нет ни одного вердикта по схеме."""
+    try:
+        return Verdicts.model_validate_json(text)
+    except ValidationError:
+        pass
+    start = text.find("[")
+    if start < 0:
+        return None
+    decoder = json.JSONDecoder()
+    items: list[Verdict] = []
+    pos = start + 1
+    while True:
+        while pos < len(text) and text[pos] in " \t\r\n,":
+            pos += 1
+        try:
+            raw, pos = decoder.raw_decode(text, pos)
+            items.append(Verdict.model_validate(raw))
+        except (ValueError, ValidationError):
+            break
+    return Verdicts(items=items) if items else None
 
 
 def judge(items: Sequence[ClaimRef], verdicts: Verdicts, transcript: Transcript) -> dict[str, Mark]:

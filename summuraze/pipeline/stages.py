@@ -348,18 +348,21 @@ def build_verify(out: Path, llm: LLMProvider, transcript: Transcript, document: 
             room = plan.limit - budget.estimate_tokens(system + question)
             groups = _verify_groups(llm, transcript, asked, room)
         for i, (group_prefix, group) in enumerate(groups, 1):
-            what = "проверки" if len(groups) == 1 else f"проверки окна {i}"
             for _ in range(1 + verify.RETRIES):
-                result, verdicts = _ask(
-                    llm,
-                    verify.Verdicts,
-                    what,
-                    system,
-                    group_prefix,
-                    verify.question(group),
-                    min(verify.output_tokens(len(group)), plan.output),
+                result = llm.complete(
+                    system=system,
+                    prefix=group_prefix,
+                    question=verify.question(group),
+                    max_tokens=min(verify.output_tokens(len(group)), plan.output),
+                    schema=strict_schema(verify.Verdicts),
                 )
-                assert isinstance(verdicts, verify.Verdicts)
+                verdicts = verify.parse(result.text)
+                if verdicts is None:
+                    window = "" if len(groups) == 1 else f" (окно {i})"
+                    raise SummaryFormatError(
+                        f"модель {result.model} ответила не по схеме проверки{window}: "
+                        f"начало ответа: {result.text[:200]!r}"
+                    )
                 results.append(result)
                 marks |= verify.judge(group, verdicts, transcript)
                 group = [c for c in group if marks[c.path].status == "unchecked"]

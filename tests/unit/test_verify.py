@@ -465,3 +465,47 @@ def test_cli_reports_failed_verify(capsys: pytest.CaptureFixture[str]) -> None:
     progress(StageEvent("verify", 5, 7, "start"))
     progress(StageEvent("verify", 5, 7, "failed", 3.0))
     assert capsys.readouterr().out == "[5/7] проверка… не удалась\n"
+
+
+class TestParse:
+    FULL = (
+        '{"items": [{"n": 1, "at": "00:01:00", "verdict": "да", "note": ""}, '
+        '{"n": 2, "at": "", "verdict": "нет", "note": "не говорил"}]}'
+    )
+
+    def test_full(self) -> None:
+        v = verify.parse(self.FULL)
+        assert v is not None and [i.n for i in v.items] == [1, 2]
+
+    def test_truncated_keeps_whole_verdicts(self) -> None:
+        cut = self.FULL[: self.FULL.index('"нет"')]
+        v = verify.parse(cut)
+        assert v is not None and [i.n for i in v.items] == [1]
+
+    @pytest.mark.parametrize("text", ["", "Эхо-саммари", '{"items": [', '{"items": [{"n": "x"}]}'])
+    def test_nothing_usable(self, text: str) -> None:
+        assert verify.parse(text) is None
+
+
+def test_truncated_judge_is_asked_about_the_rest(tmp_path: Path) -> None:
+    class Cut(Judge):
+        def complete(self, **kw: Any) -> LLMResult:
+            result = super().complete(**kw)
+            if len(self.calls) == 1:  # первый ответ обрезан лимитом посреди второго вердикта
+                text = result.text
+                return result.model_copy(update={"text": text[: text.index('"n": 2') + 4]})
+            return result
+
+    llm = Cut()
+    stages.build_verify(tmp_path, llm, _transcript(), _doc())
+    report, _ = stages.load_verify(tmp_path)
+    assert len(llm.calls) == 2 and report.count("unchecked") == 0
+
+
+def test_judge_off_schema_fails_cleanly(tmp_path: Path) -> None:
+    llm = EchoLLM()
+    llm.complete = lambda **kw: LLMResult(  # type: ignore[method-assign]
+        text="не JSON", model="m", usage=TokenUsage(input=1, output=1)
+    )
+    with pytest.raises(stages.SummaryFormatError, match="не по схеме проверки"):
+        stages.build_verify(tmp_path, llm, _transcript(), _doc())
