@@ -177,6 +177,50 @@ class VADSettings(BaseSettings):
     speech_pad_ms: int = Field(default=400, ge=0)
 
 
+class LocalLLMSettings(BaseSettings):
+    """Локальная модель для `--local` (#19): summuraze сам поднимает `llama-server` после ASR
+    и гасит его после саммари.
+
+    Сервер — отдельный процесс на время стадии, а не постоянный демон: Whisper и 8B-модель вместе
+    в 14 ГБ не влезают (CLAUDE.md, «Память»), а запущенный заранее сервер держал бы 5–7 ГБ всё
+    время транскрибации.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_LOCAL_LLM_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Файл gguf; выбор модели — замером на этом железе (BENCHMARKS.md, «Саммаризация»).
+    model: Path | None = None
+    # Бинарь llama.cpp: имя в PATH или полный путь.
+    server: str = "llama-server"
+    # Контекст сервера. От него же — порог single-pass и окна (#16, #21). Каждые 1k токенов
+    # контекста — ~70 МБ KV-кэша у 8B в q8_0: 16k — около гигабайта сверх весов.
+    context: int = Field(default=16_384, ge=4096)
+    # Потоки генерации; пусто — по числу физических ядер (у llama.cpp по умолчанию — все логические,
+    # на SMT это медленнее).
+    threads: int | None = Field(default=None, gt=0)
+    # Сколько ждать загрузки модели с диска.
+    start_timeout: float = Field(default=300.0, gt=0)
+    # Дополнительные флаги llama-server как есть, JSON-списком: ["--reasoning-budget", "0"].
+    args: list[str] = []
+    # Сколько последних KV-кэшей транскриптов держать на диске (у 4B — ~1.5 ГБ на час
+    # записи). 0 — не сохранять: повторный прогон с другим профилем пересчитает префикс заново.
+    slot_cache: int = Field(default=2, ge=0)
+    # Куда их класть; задаёт `Settings.localized()` — рядом с кэшем артефактов.
+    slot_dir: Path | None = None
+
+    @field_validator("model", "threads", "slot_dir", mode="before")
+    @classmethod
+    def _blank_means_none(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+
 class LLMSettings(BaseSettings):
     """Провайдер саммаризации.
 
@@ -227,6 +271,8 @@ class LLMSettings(BaseSettings):
     # Запрет сети (#20): фабрика не создаст провайдера с внешним адресом. Ставится из
     # `Settings.local_only`, а не своей переменной.
     local_only: bool = False
+    # Поднять llama-server самому (#19): задаётся `Settings.localized()`, а не переменной.
+    server: LocalLLMSettings | None = Field(default=None, exclude=True)
 
     @property
     def host(self) -> str:
@@ -256,6 +302,7 @@ class Settings(BaseSettings):
     record: RecordSettings = Field(default_factory=RecordSettings)
     asr: ASRSettings = Field(default_factory=ASRSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    local_llm: LocalLLMSettings = Field(default_factory=LocalLLMSettings)
 
     # Локальный STT сам по себе приватности не даёт: саммари по API увозит транскрипт целиком.
     # Полный запрет сети на уровне фабрики провайдеров — #20; здесь ловим противоречие раньше,
@@ -288,6 +335,36 @@ class Settings(BaseSettings):
     def restricted(self) -> Settings:
         """Тот же конфиг под `--local-only`: с той же проверкой, что и из .env."""
         return self.model_copy(update={"local_only": True})._enforce_local_only()
+
+    def localized(self) -> Settings:
+        """`--local` (#19): саммари делает своя модель через llama-server, сеть запрещена.
+
+        Это та же секция `llm` с локальным адресом (guardrail #2): конвейер и адаптер не знают,
+        что модель своя, — разница только в том, что фабрика сначала поднимает сервер."""
+        local = self.local_llm
+        if local.model is None:
+            raise ValueError(
+                "для --local нужна модель: SUMMURAZE_LOCAL_LLM_MODEL=/путь/к/модели.gguf "
+                "(какую — см. docs/BENCHMARKS.md, «Саммаризация»)"
+            )
+        if not local.model.is_file():
+            raise ValueError(f"нет файла модели: {local.model} (SUMMURAZE_LOCAL_LLM_MODEL)")
+        llm = LLMSettings(
+            provider="openai-compat",
+            # Порт выберет фабрика при запуске сервера; адрес здесь — чтобы проверки «локально
+            # ли» видели правду до запуска.
+            base_url="http://127.0.0.1/v1",
+            model=local.model.stem,
+            api_key=SecretStr(""),
+            proxy_url=None,
+            openrouter_quantizations=[],
+            context=local.context,
+            single_pass_max=self.llm.single_pass_max,
+            server=local.model_copy(
+                update={"slot_dir": local.slot_dir or self.paths.artifacts_dir / "llama-slots"}
+            ),
+        )
+        return self.model_copy(update={"llm": llm}).restricted()
 
 
 def local_only_conflict(llm: LLMSettings) -> str:

@@ -39,6 +39,10 @@ def make_llm(settings: LLMSettings) -> LLMProvider:
 
         return EchoLLM(settings.context)
     check_llm(settings)  # и при прямом вызове фабрики, мимо preflight
+    if settings.server is not None:
+        from summuraze.summarize.llama_server import LocalLLM
+
+        return LocalLLM(settings)
     from summuraze.summarize.openai_compat import OpenAICompatLLM
 
     return OpenAICompatLLM(settings)
