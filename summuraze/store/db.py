@@ -17,6 +17,7 @@ Refs #6
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -86,6 +87,15 @@ _MIGRATIONS: list[str] = [
         granted_at TEXT NOT NULL
     );
     """,
+    # #23: веб показывает, что идёт сейчас, — в том числе прогон, запущенный из терминала.
+    # stage — последняя начатая стадия (у упавшего — та, на которой упал); pid — чтобы отличить
+    # идущий прогон от убитого: у того статус так и остался 'running'.
+    """
+    ALTER TABLE runs ADD COLUMN profile TEXT;
+    ALTER TABLE runs ADD COLUMN stage TEXT;
+    ALTER TABLE runs ADD COLUMN stage_started_at TEXT;
+    ALTER TABLE runs ADD COLUMN pid INTEGER;
+    """,
 ]
 
 OutputKind = Literal["note", "audio", "subtitles"]
@@ -125,6 +135,38 @@ class RecordingRow:
     path: str
     first_seen: str
     duration: float | None
+
+
+@dataclass(frozen=True)
+class LatestRun:
+    """Запись и её последний прогон — строка списка в вебе (#23)."""
+
+    id: int
+    path: str
+    first_seen: str
+    duration: float | None
+    pruned_at: str | None
+    run_id: int | None
+    started_at: str | None
+    finished_at: str | None
+    status: RunStatus | None
+    error: str | None
+    stage: str | None
+    stage_started_at: str | None
+    pid: int | None
+    # Прогон, чей конспект показан, и сколько стоили все прогоны записи.
+    profile: str | None
+    llm_provider: str | None
+    llm_model: str | None
+    cost_usd: float | None
+
+
+@dataclass(frozen=True)
+class StageRow:
+    stage: str
+    key: str
+    cached: bool
+    seconds: float
 
 
 class Database:
@@ -235,14 +277,23 @@ class Database:
 
     # ── Прогоны ─────────────────────────────────────────────────────────────
 
-    def start_run(self, recording_id: int) -> int:
+    def start_run(self, recording_id: int, *, profile: str | None = None) -> int:
+        """`profile` — None у прогона без саммари (`transcribe`, `ingest`)."""
         with self._conn:
             cur = self._conn.execute(
-                "INSERT INTO runs (recording_id, started_at, status) VALUES (?, ?, 'running')",
-                (recording_id, _now()),
+                "INSERT INTO runs (recording_id, started_at, status, profile, pid)"
+                " VALUES (?, ?, 'running', ?, ?)",
+                (recording_id, _now(), profile, os.getpid()),
             )
         assert cur.lastrowid is not None
         return cur.lastrowid
+
+    def set_stage(self, run_id: int, stage: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE runs SET stage = ?, stage_started_at = ? WHERE id = ?",
+                (stage, _now(), run_id),
+            )
 
     def record_stage(
         self, run_id: int, stage: str, key: str, *, cached: bool, seconds: float
@@ -307,6 +358,38 @@ class Database:
         ).fetchall()
         return [RunRow(**dict(row)) for row in rows]
 
+    def latest_runs(self) -> list[LatestRun]:
+        """Все записи, новые сверху, с последним прогоном каждой."""
+        rows = self._conn.execute(
+            f"{_LATEST} ORDER BY COALESCE(r.started_at, rec.first_seen) DESC, rec.id DESC"
+        ).fetchall()
+        return [LatestRun(**dict(row)) for row in rows]
+
+    def latest_run(self, recording_id: int) -> LatestRun | None:
+        row = self._conn.execute(f"{_LATEST} WHERE rec.id = ?", (recording_id,)).fetchone()
+        return LatestRun(**dict(row)) if row is not None else None
+
+    def last_done_run(self, recording_id: int, stage: str) -> int | None:
+        """Последний успешный прогон записи, дошедший до стадии `stage`."""
+        row = self._conn.execute(
+            """
+            SELECT MAX(r.id) AS id FROM runs r JOIN stage_runs s ON s.run_id = r.id
+            WHERE r.recording_id = ? AND r.status = 'done' AND s.stage = ?
+            """,
+            (recording_id, stage),
+        ).fetchone()
+        return row["id"]
+
+    def run_stages(self, run_id: int) -> dict[str, StageRow]:
+        rows = self._conn.execute(
+            "SELECT stage, key, cached, seconds FROM stage_runs WHERE run_id = ? ORDER BY id",
+            (run_id,),
+        ).fetchall()
+        return {
+            row["stage"]: StageRow(row["stage"], row["key"], bool(row["cached"]), row["seconds"])
+            for row in rows
+        }
+
     # ── Согласие на отправку наружу ─────────────────────────────────────────
 
     def has_consent(self, host: str) -> bool:
@@ -318,6 +401,24 @@ class Database:
             self._conn.execute(
                 "INSERT OR IGNORE INTO consents (host, granted_at) VALUES (?, ?)", (host, _now())
             )
+
+
+# Статус — последнего прогона (что идёт сейчас); профиль и модель — последнего успешного прогона
+# с саммари (чей конспект показан); цена — всех прогонов записи: прогон из кэша стоит $0, и
+# цена последнего соврала бы, во что запись обошлась.
+_LATEST = """
+    SELECT rec.id, rec.path, rec.first_seen, rec.duration, rec.pruned_at,
+           r.id AS run_id, r.started_at, r.finished_at, r.status, r.error,
+           r.stage, r.stage_started_at, r.pid,
+           d.profile, d.llm_provider, d.llm_model,
+           (SELECT SUM(cost_usd) FROM runs WHERE recording_id = rec.id) AS cost_usd
+    FROM recordings rec
+    LEFT JOIN runs r ON r.id = (SELECT MAX(id) FROM runs WHERE recording_id = rec.id)
+    LEFT JOIN runs d ON d.id = (
+        SELECT MAX(x.id) FROM runs x JOIN stage_runs s ON s.run_id = x.id
+        WHERE x.recording_id = rec.id AND x.status = 'done' AND s.stage = 'summarize'
+    )
+"""
 
 
 def _now() -> str:

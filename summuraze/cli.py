@@ -20,7 +20,6 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
-from urllib.parse import urlparse
 
 import typer
 
@@ -74,16 +73,6 @@ LangOpt = Annotated[
         "--lang", help="Язык записи (ru, en…) или auto; по умолчанию SUMMURAZE_ASR_LANGUAGE"
     ),
 ]
-
-_STAGE_TITLES = {
-    "ingest": "ингест",
-    "vad": "поиск речи",
-    "asr": "распознавание",
-    "summarize": "саммари",
-    "verify": "проверка",
-    "audio": "аудио для заметки",
-    "render": "заметка",
-}
 
 
 @app.callback(invoke_without_command=True)
@@ -391,7 +380,7 @@ def log(
     if not runs:
         typer.echo("Прогонов ещё не было.")
         return
-    from summuraze.config import is_local_url
+    from summuraze.config import llm_destination
     from summuraze.render.markdown import short_timecode
 
     for r in runs:
@@ -403,10 +392,7 @@ def log(
         )
         if r.llm_model:
             # Что куда уехало (#20): хост провайдера, а не только модель.
-            url = r.llm_provider or ""
-            where = (
-                "локально" if url == "echo" or is_local_url(url) else urlparse(url).hostname or url
-            )
+            where = llm_destination(r.llm_provider or "")
             tokens = ""
             if r.input_tokens is not None and r.output_tokens is not None:
                 tokens = f" · {_k(r.input_tokens)}→{_k(r.output_tokens)} ток."
@@ -429,6 +415,42 @@ def _took(seconds: float) -> str:
 
 def _k(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+@app.command()
+def web(
+    host: Annotated[
+        str, typer.Option(help="Адрес; 0.0.0.0 — видно из сети, без пароля: только в своей")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Порт")] = 8765,
+    open_browser: Annotated[
+        bool, typer.Option("--open/--no-open", help="Открыть страницу в браузере")
+    ] = True,
+) -> None:
+    """Веб-интерфейс: записи, конспект, транскрипт и плеер по таймкодам."""
+    import uvicorn
+
+    from summuraze.config import get_settings
+    from summuraze.web.app import create_app
+
+    url = f"http://{'127.0.0.1' if host == '0.0.0.0' else host}:{port}/"
+    # Не `is_local_url`: для адреса, который слушают, 0.0.0.0 — все интерфейсы, а не этот хост.
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        typer.secho(
+            f"⚠ {host}: страницу и транскрипты увидит любой в этой сети — пароля нет.",
+            fg="yellow",
+            err=True,
+        )
+    typer.echo(f"Веб: {url}  (Ctrl+C — остановить)")
+    if open_browser:
+        threading.Timer(1.0, _open_url, args=(url,)).start()
+    uvicorn.run(create_app(get_settings()), host=host, port=port, log_level="warning")
+
+
+def _open_url(url: str) -> None:
+    import webbrowser
+
+    webbrowser.open(url)
 
 
 @app.command()
@@ -681,7 +703,9 @@ class _StageProgress:
         self._ticker: threading.Thread | None = None
 
     def __call__(self, e: StageEvent) -> None:
-        prefix = f"[{e.index}/{e.total}] {_STAGE_TITLES[e.stage]}"
+        from summuraze.pipeline.orchestrator import STAGE_TITLES
+
+        prefix = f"[{e.index}/{e.total}] {STAGE_TITLES[e.stage]}"
         if e.status == "start":
             typer.echo(f"{prefix}…", nl=False)
             if sys.stdout.isatty():
