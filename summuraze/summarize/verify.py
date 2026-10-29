@@ -163,6 +163,10 @@ def claims(document: BaseModel, transcript: Transcript) -> list[ClaimRef]:
     ]
 
 
+def has_claims(document: BaseModel) -> bool:
+    return any(text for _, text, _ in _walk(document, ""))
+
+
 def _walk(node: BaseModel, path: str) -> Iterator[tuple[str, str, str]]:
     text = _text(node)
     if text is not None:

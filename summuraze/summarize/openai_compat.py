@@ -66,6 +66,7 @@ class OpenAICompatLLM:
         self._local = cfg.is_local
         self._openrouter = cfg.host == OPENROUTER_HOST
         self._quantizations = cfg.openrouter_quantizations
+        self._reasoning = cfg.openrouter_reasoning
         headers = {"Content-Type": "application/json"}
         key = cfg.api_key.get_secret_value()
         if key:
@@ -131,6 +132,8 @@ class OpenAICompatLLM:
                 routing["quantizations"] = self._quantizations
             if routing:
                 body["provider"] = routing
+            if self._reasoning is not None:
+                body["reasoning"] = {"enabled": self._reasoning}
         at = datetime.now(UTC)
         data = self._post(body)
         try:

@@ -49,7 +49,7 @@ from summuraze.summarize.budget import (
     input_limit,
     output_reserve,
 )
-from summuraze.summarize.openai_compat import LLMError
+from summuraze.summarize.openai_compat import OPENROUTER_HOST, LLMError
 from summuraze.summarize.profiles import Profile, get_profile
 from summuraze.types import ASRProvider, AudioInfo, Interval, LLMProvider, LLMResult, Transcript
 
@@ -271,6 +271,7 @@ class Pipeline:
             # запасом вдвое): правка нарезки не должна сбрасывать кэш обычных лекций.
             limit = input_limit(llm_cfg.context, prof.max_tokens, llm_cfg.single_pass_max)
             long = estimate_tokens(stages.transcript_prefix(transcript)) > limit // 2
+            reasoning = llm_cfg.openrouter_reasoning if llm_cfg.host == OPENROUTER_HOST else None
             summary_key = ArtifactKey(
                 "summarize",
                 stages.SUMMARY_VERSION,
@@ -282,6 +283,7 @@ class Pipeline:
                     "profile_version": prof.version,
                     "suspects": repetition.VERSION,
                     **({"max_tokens": output} if output != prof.max_tokens else {}),
+                    **({"reasoning": reasoning} if reasoning is not None else {}),
                     **({"windows": windows.VERSION} if long else {}),
                     **({"replacements": glossary.replacements} if glossary.replacements else {}),
                 },
@@ -312,7 +314,11 @@ class Pipeline:
                         "verify",
                         verify.VERSION,
                         (summary_key.digest,),
-                        {"provider": llm_cfg.provider, "model": llm_cfg.model},
+                        {
+                            "provider": llm_cfg.provider,
+                            "model": llm_cfg.model,
+                            **({"reasoning": reasoning} if reasoning is not None else {}),
+                        },
                     )
 
                     def build_verify(out: Path) -> None:

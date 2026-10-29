@@ -45,8 +45,9 @@ VAD_VERSION = 1
 ASR_VERSION = 2
 # 2: сомнительные сегменты помечены в префиксе, правило про пометку — в system (#12).
 # 3: ответ — JSON по схеме профиля, в артефакте разобранный документ (#17).
+# 4: пустой документ — ошибка с повтором, а не саммари (#63); в кэше могли остаться пустые.
 # Окна (#21) версию не поднимают: у них своя, `windows.VERSION`, в ключе длинных записей.
-SUMMARY_VERSION = 3
+SUMMARY_VERSION = 4
 
 _AUDIO = "audio.wav"
 _AUDIO_INFO = "audio.json"
@@ -128,6 +129,10 @@ def _line(s: Segment) -> str:
     return f"[{fmt_timecode(s.start)}] {SUSPECT_MARK + ' ' if s.suspect else ''}{s.text.strip()}"
 
 
+# Пустой документ по схеме — сбой провайдера, а не ответ: OpenRouter может отдать повтор другому.
+EMPTY_RETRIES = 2
+
+
 class SummaryFormatError(RuntimeError):
     """Модель ответила не по схеме профиля — такой ответ в кэш не кладём."""
 
@@ -156,6 +161,7 @@ def build_summary(
             prefix,
             profile.question,
             plan.output,
+            whole=True,
         )
     else:
         result, document, plan = _windowed(llm, transcript, profile, plan, parts)
@@ -180,22 +186,51 @@ def _ask(
     prefix: str,
     question: str,
     max_tokens: int,
+    *,
+    whole: bool = False,
 ) -> tuple[LLMResult, BaseModel]:
-    result = llm.complete(
-        system=system,
-        prefix=prefix,
-        question=question,
-        max_tokens=max_tokens,
-        schema=strict_schema(document),
+    """`whole` — документ всей записи: пустым он быть не может. Карта окна — может (тишина)."""
+    spent: list[LLMResult] = []
+    for attempt in range(EMPTY_RETRIES + 1):
+        result = llm.complete(
+            system=system,
+            prefix=prefix,
+            question=question,
+            max_tokens=max_tokens,
+            schema=strict_schema(document),
+        )
+        spent.append(result)
+        try:
+            parsed = document.model_validate_json(result.text)
+        except ValidationError as e:
+            raise SummaryFormatError(
+                f"модель {result.model} ответила не по схеме {what} "
+                f"(обрезан ответ или сервер не поддерживает structured outputs): "
+                f"{e.errors()[0]['msg']}; начало ответа: {result.text[:200]!r}"
+            ) from e
+        # Заглушка отвечает пустым документом по определению — на ней держится прогон без сети.
+        if not whole or llm.name == "echo" or not _hollow(parsed):
+            return combined(spent), parsed
+        if attempt < EMPTY_RETRIES:
+            logger.warning(
+                "модель {} вернула пустой документ {} — повтор {}/{}",
+                result.model,
+                what,
+                attempt + 1,
+                EMPTY_RETRIES,
+            )
+    raise SummaryFormatError(
+        f"модель {result.model} {EMPTY_RETRIES + 1} раза подряд вернула пустой документ {what} "
+        f"— по схеме, но без единого утверждения; начало ответа: {result.text[:200]!r}"
     )
-    try:
-        return result, document.model_validate_json(result.text)
-    except ValidationError as e:
-        raise SummaryFormatError(
-            f"модель {result.model} ответила не по схеме {what} "
-            f"(обрезан ответ или сервер не поддерживает structured outputs): "
-            f"{e.errors()[0]['msg']}; начало ответа: {result.text[:200]!r}"
-        ) from e
+
+
+def _hollow(document: BaseModel) -> bool:
+    """Ни одного утверждения (у `raw` — ни одного блока): конспекта нет, есть пустой шаблон.
+    Разделы с заголовками без тезисов — тоже пустой: DeepSeek так отвечает (#63)."""
+    if isinstance(document, RawDoc):
+        return not document.blocks
+    return not verify.has_claims(document)
 
 
 # Окно меньше — карта из него почти пустая, а окон столько, что второй проход утонет в картах.
@@ -301,6 +336,7 @@ def _windowed(
             prefix,
             profile.question,
             plan.output,
+            whole=True,
         )
         results.append(result)
     return combined(results), document, replace(plan, windows=len(cut), final=final)

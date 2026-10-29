@@ -68,6 +68,8 @@ class H(BaseHTTPRequestHandler):
         schema = req["response_format"]["json_schema"]["schema"]
         props = schema["properties"].items()
         doc = {k: ([] if v.get("type") == "array" else "Лекция") for k, v in props}
+        if "tldr" in doc:  # пустой конспект конвейер не примет (#63)
+            doc["tldr"] = [{"text": "Лекция о сигналах", "at": "00:00:01"}]
         self._send({
             "model": req["model"],
             "choices": [{"message": {"content": json.dumps(doc)}, "finish_reason": "stop"}],
