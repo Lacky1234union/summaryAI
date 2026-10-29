@@ -143,6 +143,7 @@ def test_second_run_takes_everything_from_cache(lecture: Path) -> None:
         "vad": True,
         "asr": True,
         "summarize": True,
+        "verify": True,
         "audio": True,
         "render": False,
     }
@@ -152,6 +153,7 @@ def test_second_run_takes_everything_from_cache(lecture: Path) -> None:
         "vad": "cached",
         "asr": "cached",
         "summarize": "cached",
+        "verify": "cached",
         "audio": "cached",
         "render": "done",
     }
@@ -261,7 +263,7 @@ class TestCLI:
         assert first.exit_code == 0, first.output
         assert "Заметка:" in first.output
         second = runner.invoke(app, ["run", str(lecture)])
-        assert second.output.count("из кэша") == 5, second.output
+        assert second.output.count("из кэша") == 6, second.output
 
     def test_transcribe_then_log(self, lecture: Path) -> None:
         runner = CliRunner()

@@ -24,7 +24,7 @@ from summuraze.audio.vad import detect_speech
 from summuraze.config import VADSettings
 from summuraze.render.markdown import fmt_timecode, resolve_at
 from summuraze.render.subtitles import SUSPECT_MARK
-from summuraze.summarize import budget, windows
+from summuraze.summarize import budget, verify, windows
 from summuraze.summarize.profiles import Profile, RawDoc
 from summuraze.summarize.schema import strict_schema
 from summuraze.types import (
@@ -53,6 +53,7 @@ _AUDIO_INFO = "audio.json"
 _SPEECH = "speech.json"
 _TRANSCRIPT = "transcript.json"
 _SUMMARY = "summary.json"
+_VERIFY = "verify.json"
 
 
 def build_ingest(out: Path, source: Path, *, stream: int | None) -> None:
@@ -302,10 +303,10 @@ def _windowed(
             plan.output,
         )
         results.append(result)
-    return _combined(results), document, replace(plan, windows=len(cut), final=final)
+    return combined(results), document, replace(plan, windows=len(cut), final=final)
 
 
-def _combined(results: list[LLMResult]) -> LLMResult:
+def combined(results: list[LLMResult]) -> LLMResult:
     """Все запросы прогона одной строкой лога: токены и деньги — сумма, текст — итоговый."""
     costs = [r.cost_usd for r in results]
     return LLMResult(
@@ -324,3 +325,83 @@ def load_summary(artifact: Path, profile: Profile) -> tuple[LLMResult, BaseModel
     payload = json.loads((artifact / _SUMMARY).read_text(encoding="utf-8"))
     result = LLMResult.model_validate(payload["result"])
     return result, profile.document.model_validate(payload["document"])
+
+
+def build_verify(out: Path, llm: LLMProvider, transcript: Transcript, document: BaseModel) -> None:
+    """Проверка утверждений (#22): транскрипт префиксом, как в саммари, — кэш тот же."""
+    items = verify.claims(document, transcript)
+    marks = verify.structural(items, transcript)
+    asked = verify.to_judge(items, marks)
+    results: list[LLMResult] = []
+    if asked:
+        system = f"{verify.SYSTEM}\n\n{SUSPECT_RULE}"
+        prefix = transcript_prefix(transcript)
+        question = verify.question(asked)
+        plan = budget.plan(
+            llm,
+            [prefix, system, question],
+            max_tokens=verify.output_tokens(len(asked)),
+            what="проверка",
+        )
+        groups = [(prefix, asked)]
+        if plan.mode != "single":
+            room = plan.limit - budget.estimate_tokens(system + question)
+            groups = _verify_groups(llm, transcript, asked, room)
+        for i, (group_prefix, group) in enumerate(groups, 1):
+            for _ in range(1 + verify.RETRIES):
+                result = llm.complete(
+                    system=system,
+                    prefix=group_prefix,
+                    question=verify.question(group),
+                    max_tokens=min(verify.output_tokens(len(group)), plan.output),
+                    schema=strict_schema(verify.Verdicts),
+                )
+                verdicts = verify.parse(result.text)
+                if verdicts is None:
+                    window = "" if len(groups) == 1 else f" (окно {i})"
+                    raise SummaryFormatError(
+                        f"модель {result.model} ответила не по схеме проверки{window}: "
+                        f"начало ответа: {result.text[:200]!r}"
+                    )
+                results.append(result)
+                marks |= verify.judge(group, verdicts, transcript)
+                group = [c for c in group if marks[c.path].status == "unchecked"]
+                if not group:
+                    break
+                logger.info("проверка: судья не ответил про {} — переспрашиваю", len(group))
+    report = verify.Report(marks={c.path: marks[c.path] for c in items})
+    logger.info("проверка: {}", report.describe())
+    payload = {
+        "report": report.model_dump(),
+        "result": combined(results).model_dump() if results else None,
+        "requests": len(results),
+    }
+    (out / _VERIFY).write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
+
+
+def _verify_groups(
+    llm: LLMProvider, transcript: Transcript, asked: list[verify.ClaimRef], limit: int
+) -> list[tuple[str, list[verify.ClaimRef]]]:
+    """Транскрипт не влез: окна, как у саммари, и каждому — утверждения из его ядра."""
+    limit -= budget.TEMPLATE_TOKENS
+    if limit < MIN_WINDOW_TOKENS:
+        raise budget.TranscriptTooLong(
+            budget.too_long(llm.model, f"на окно проверки остаётся {limit} токенов")
+        )
+    lines = [s for s in transcript.segments if s.text.strip()]
+    cut = windows.split(lines, [budget.estimate_tokens(_line(s) + "\n") for s in lines], limit)
+    groups = []
+    for window in cut:
+        mine = [c for c in asked if c.at is not None and window.owns(c.at)]
+        if mine:
+            groups.append(("\n".join(_line(s) for s in window.segments), mine))
+    return groups
+
+
+def load_verify(artifact: Path) -> tuple[verify.Report, LLMResult | None]:
+    payload = json.loads((artifact / _VERIFY).read_text(encoding="utf-8"))
+    raw = payload["result"]
+    return (
+        verify.Report.model_validate(payload["report"]),
+        LLMResult.model_validate(raw) if raw is not None else None,
+    )

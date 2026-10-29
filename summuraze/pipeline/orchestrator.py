@@ -1,6 +1,6 @@
-"""Прогон конвейера: ingest → vad → asr → summarize → render, каждая стадия через кэш.
+"""Прогон конвейера: ingest → vad → asr → summarize → verify → render, каждая стадия через кэш.
 
-Последовательность явная, а не «движок DAG»: стадий пять, и прочитать их сверху вниз проще,
+Последовательность явная, а не «движок DAG»: стадий семь, и прочитать их сверху вниз проще,
 чем разбирать граф.
 
 Провайдеры создаются **внутри** сборки стадии, то есть только при промахе кэша. Два следствия:
@@ -9,6 +9,9 @@
 
 Рендер не кэшируется: это дешёвая запись заметки, и она должна происходить при каждом прогоне —
 заметку могли удалить или переместить.
+
+LLM одна на саммари и проверку (#22): создаётся при первом промахе кэша любой из двух и гаснет
+после проверки — своя модель не поднимается дважды.
 
 Refs #7, #10
 """
@@ -21,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from loguru import logger
 from pydantic import BaseModel
 
 from summuraze.asr import repetition
@@ -31,23 +35,34 @@ from summuraze.audio.vad import NoSpeechError
 from summuraze.config import ASRSettings, LLMSettings, Settings
 from summuraze.pipeline import stages
 from summuraze.pipeline.memory import release_memory
+from summuraze.pipeline.stages import SummaryFormatError
 from summuraze.render.markdown import note_layout, publish_media, render_note
 from summuraze.store.artifacts import ArtifactKey, ArtifactStore
 from summuraze.store.db import Database, OutputKind
-from summuraze.summarize import windows
+from summuraze.summarize import verify, windows
 from summuraze.summarize.base import check_llm, make_llm
 from summuraze.summarize.budget import (
     Budget,
+    TranscriptTooLong,
     check_context,
     estimate_tokens,
     input_limit,
     output_reserve,
 )
+from summuraze.summarize.openai_compat import LLMError
 from summuraze.summarize.profiles import Profile, get_profile
 from summuraze.types import ASRProvider, AudioInfo, Interval, LLMProvider, LLMResult, Transcript
 
-StageName = Literal["ingest", "vad", "asr", "summarize", "audio", "render"]
-STAGES: tuple[StageName, ...] = ("ingest", "vad", "asr", "summarize", "audio", "render")
+StageName = Literal["ingest", "vad", "asr", "summarize", "verify", "audio", "render"]
+STAGES: tuple[StageName, ...] = (
+    "ingest",
+    "vad",
+    "asr",
+    "summarize",
+    "verify",
+    "audio",
+    "render",
+)
 
 
 @dataclass(frozen=True)
@@ -55,7 +70,7 @@ class StageEvent:
     stage: StageName
     index: int
     total: int
-    status: Literal["start", "done", "cached"]
+    status: Literal["start", "done", "cached", "failed"]
     seconds: float = 0.0
 
 
@@ -73,6 +88,9 @@ class RunResult:
     recording_id: int | None = None
     # Решение «один запрос или окна» (#16); None — саммари из кэша, запроса не было.
     budget: Budget | None = None
+    # Проверка утверждений (#22); None — выключена, не удалась или прогон остановлен раньше.
+    verification: verify.Report | None = None
+    verification_error: str | None = None
 
 
 class Pipeline:
@@ -128,19 +146,28 @@ class Pipeline:
         if not source.is_file():
             raise IngestError(f"файл не найден: {source}")
         note_cfg = self.settings.note
-        skipped = {"vad": not self.settings.vad.enabled, "audio": not note_cfg.audio}
+        skipped = {
+            "vad": not self.settings.vad.enabled,
+            "verify": not self.settings.verify.enabled,
+            "audio": not note_cfg.audio,
+        }
         active = [s for s in STAGES if not skipped.get(s)]
         total = active.index(until) + 1
         recording_id, source_hash = self.db.register_source(source)
         run_id = self.db.start_run(recording_id)
         cached: dict[str, bool] = {}
-        llm_fresh: LLMResult | None = None
+        fresh: list[LLMResult] = []  # запросы к LLM этого прогона — для цены в `log`
 
         def stage(name: StageName, key: ArtifactKey, build: Callable[[Path], None]) -> Path:
             index = active.index(name) + 1
             self._on_event(StageEvent(name, index, total, "start"))
             started = time.monotonic()
-            path, hit = self.store.get_or_build(key, build)
+            try:
+                path, hit = self.store.get_or_build(key, build)
+            except BaseException:
+                seconds = time.monotonic() - started
+                self._on_event(StageEvent(name, index, total, "failed", seconds))
+                raise
             seconds = time.monotonic() - started
             cached[name] = hit
             self.db.record_stage(run_id, name, key.digest, cached=hit, seconds=seconds)
@@ -248,25 +275,54 @@ class Pipeline:
                 },
             )
 
-            def build_summary(out: Path) -> None:
-                nonlocal llm_fresh
-                # Своя модель (#19) поднимается здесь, после ASR, и гаснет до рендера.
-                llm = self._llm_factory(llm_cfg)
-                try:
-                    result.budget = stages.build_summary(
-                        out, llm, transcript, prof, single_pass_max=llm_cfg.single_pass_max
-                    )
-                finally:
-                    llm.close()
-                    del llm
-                    release_memory()
-                llm_fresh, _ = stages.load_summary(out, prof)
+            llm: LLMProvider | None = None
 
-            summary, document = stages.load_summary(
-                stage("summarize", summary_key, build_summary), prof
-            )
-            result.summary = summary
-            result.document = document
+            def open_llm() -> LLMProvider:
+                # Своя модель (#19) поднимается здесь, после ASR, и гаснет до рендера.
+                nonlocal llm
+                if llm is None:
+                    llm = self._llm_factory(llm_cfg)
+                return llm
+
+            def build_summary(out: Path) -> None:
+                result.budget = stages.build_summary(
+                    out, open_llm(), transcript, prof, single_pass_max=llm_cfg.single_pass_max
+                )
+                fresh.append(stages.load_summary(out, prof)[0])
+
+            try:
+                summary_dir = stage("summarize", summary_key, build_summary)
+                summary, document = stages.load_summary(summary_dir, prof)
+                result.summary = summary
+                result.document = document
+                if until != "summarize" and not skipped["verify"]:
+                    verify_key = ArtifactKey(
+                        "verify",
+                        verify.VERSION,
+                        (summary_key.digest,),
+                        {"provider": llm_cfg.provider, "model": llm_cfg.model},
+                    )
+
+                    def build_verify(out: Path) -> None:
+                        stages.build_verify(out, open_llm(), transcript, document)
+                        checked = stages.load_verify(out)[1]
+                        if checked is not None:
+                            fresh.append(checked)
+
+                    try:
+                        result.verification, _ = stages.load_verify(
+                            stage("verify", verify_key, build_verify)
+                        )
+                    except (LLMError, SummaryFormatError, TranscriptTooLong) as e:
+                        # Проверка — надстройка над готовым конспектом: её сбой не должен стоить
+                        # заметки. В кэш не попадает — следующий прогон попробует снова.
+                        logger.warning("проверка утверждений не удалась: {}", e)
+                        result.verification_error = str(e)
+            finally:
+                if llm is not None:
+                    llm.close()
+                    llm = None
+                    release_memory()
 
             if until == "render":
                 note_audio: Path | None = None
@@ -302,6 +358,7 @@ class Pipeline:
                     profile=prof.name,
                     media=media,
                     debug=note_cfg.debug,
+                    report=result.verification,
                 )
                 # Срок хранения (#49) найдёт аудио и заметку по БД, а не угадыванием имён.
                 outputs: list[tuple[OutputKind, Path]] = [("note", result.note)]
@@ -316,6 +373,7 @@ class Pipeline:
                 self.db.record_stage(run_id, "render", "-", cached=False, seconds=seconds)
                 self._on_event(StageEvent("render", index, total, "done", seconds))
 
+            spent = stages.combined(fresh) if fresh else None
             # Стоимость — только того, что реально ушло в модель в ЭТОМ прогоне: саммари из кэша
             # ничего не стоило, и записать ему цену первого прогона значило бы врать в `log`.
             self.db.finish_run(
@@ -324,8 +382,8 @@ class Pipeline:
                 asr_model=transcript.asr_model,
                 llm_provider=llm_cfg.provider if llm_cfg.provider == "echo" else llm_cfg.base_url,
                 llm_model=summary.model,
-                usage=llm_fresh.usage if llm_fresh else None,
-                cost_usd=llm_fresh.cost_usd if llm_fresh else 0.0,
+                usage=spent.usage if spent else None,
+                cost_usd=spent.cost_usd if spent else 0.0,
             )
             return result
         except BaseException as e:

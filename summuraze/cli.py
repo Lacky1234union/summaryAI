@@ -80,6 +80,7 @@ _STAGE_TITLES = {
     "vad": "поиск речи",
     "asr": "распознавание",
     "summarize": "саммари",
+    "verify": "проверка",
     "audio": "аудио для заметки",
     "render": "заметка",
 }
@@ -603,6 +604,10 @@ def _run(
             result = pipeline.run(source, until=until, stream=stream, profile=profile, terms=terms)
             if result.budget is not None:
                 typer.echo(f"Саммари: {result.budget.describe()}")
+            if result.verification is not None:
+                typer.echo(f"Проверка: {result.verification.describe()}")
+            if result.verification_error is not None:
+                typer.echo(f"Проверка не удалась, заметка — без неё: {result.verification_error}")
             if until == "render":
                 _auto_prune(pipeline, keep=result.recording_id)
             return result
@@ -685,7 +690,7 @@ class _StageProgress:
                 self._ticker.start()
             return
         tty = self.halt()
-        tail = "из кэша" if e.status == "cached" else f"{e.seconds:.1f} с"
+        tail = {"cached": "из кэша", "failed": "не удалась"}.get(e.status, f"{e.seconds:.1f} с")
         # \033[K — стереть секундомер, если итог короче него.
         typer.echo(f"\r{prefix}… {tail}\033[K" if tty else f" {tail}")
 

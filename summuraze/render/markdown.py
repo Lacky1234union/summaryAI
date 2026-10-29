@@ -20,6 +20,10 @@ LiveSync не должен заново рассылать 15 МБ аудио и
 транскрипт и «неразборчиво» свёрнуты, таймкоды `▶ 01:37`. Отладочный (`SUMMURAZE_NOTE_DEBUG`,
 `--debug`) — всё подряд: модели, стоимость, исходник, полные таймкоды; по нему разбирают, что
 сделала модель. Содержание одно и то же — разная только подача.
+
+Пометки проверки (#22) стоят после таймкода утверждения: ❌ — нет в записи, ◐ — частично,
+↪ — сказано в другом месте (ссылка туда), ❔ — модель-судья не ответила. Подтверждённое — без
+пометки: заметка читается, а не пестрит. Сводка — в шапке.
 """
 
 from __future__ import annotations
@@ -30,12 +34,16 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from summuraze.render.subtitles import to_srt
 from summuraze.summarize.profiles import Claim, LectureDoc, RawDoc
 from summuraze.types import AudioInfo, LLMResult, Segment, Transcript
+
+if TYPE_CHECKING:
+    from summuraze.summarize.verify import Report
 
 DEFAULT_PROFILE = "lecture"
 _PROFILE_TAGS = {"lecture": "лекция", "raw": "транскрипт"}
@@ -113,6 +121,7 @@ class _Body:
     transcript: Transcript
     media: str | None  # имя файла аудио в хранилище; None — таймкоды текстом
     debug: bool = True
+    report: Report | None = None
     seen: set[str] = field(default_factory=set)
 
     def fresh(self, text: str) -> bool:
@@ -123,8 +132,7 @@ class _Body:
         return True
 
     def tc(self, seconds: float | None) -> str:
-        # Единственное место, где таймкод становится текстом заметки. Пометки verify (#22)
-        # о непроверенных утверждениях встанут сюда же.
+        # Единственное место, где таймкод становится текстом заметки.
         if seconds is None:
             return "⚠️ без таймкода"
         if self.debug:
@@ -137,11 +145,30 @@ class _Body:
             return f"`{label}`"
         return f"[[{self.media}#t={seconds:.1f}|{label}]]"
 
-    def at(self, at: str) -> str:
-        return self.tc(resolve_at(at, self.transcript))
+    def at(self, at: str, path: str | None = None) -> str:
+        return self.tc(resolve_at(at, self.transcript)) + self.mark(path)
 
-    def claims(self, items: list[Claim]) -> list[str]:
-        return [f"- {c.text.strip()} {self.at(c.at)}" for c in items if self.fresh(c.text)]
+    def mark(self, path: str | None) -> str:
+        """Пометка проверки после таймкода; `path` — адрес утверждения в документе."""
+        if self.report is None or path is None or (m := self.report.marks.get(path)) is None:
+            return ""
+        note = f": {m.note}" if m.note else ""
+        if m.status == "unsupported":
+            return f" ❌ *нет в записи{note}*"
+        if m.status == "partial":
+            return f" ◐ *частично{note}*"
+        if m.status == "moved":
+            return f" ↪ *сказано в* {self.tc(m.evidence)}"
+        if m.status == "unchecked":
+            return " ❔ *не проверено*"
+        return ""
+
+    def claims(self, items: list[Claim], path: str) -> list[str]:
+        return [
+            f"- {c.text.strip()} {self.at(c.at, f'{path}.{i}')}"
+            for i, c in enumerate(items)
+            if self.fresh(c.text)
+        ]
 
     def line(self, s: Segment) -> str:
         text = s.text.strip()
@@ -161,50 +188,50 @@ class _Body:
 
     def lecture_clean(self, doc: LectureDoc) -> list[str]:
         """Итоговый вид: читается сверху вниз, справочное — в callout'ах, сырое — свёрнуто."""
-        lines = _callout("summary", "Коротко", self.claims(doc.tldr))
-        for sec in doc.sections:
-            lines += [f"## {sec.title.strip()} {self.at(sec.at)}", "", *self.claims(sec.theses), ""]
-        lines += _section("Формулы и примеры", self.claims(doc.examples))
-        lines += _callout(
-            "abstract",
-            "Глоссарий",
-            [
-                f"- **{t.term.strip()}** — {t.definition.strip()} {self.at(t.at)}"
-                for t in doc.glossary
-                if self.fresh(f"термин {t.term}")
-            ],
-        )
-        for q in doc.qa:
+        lines = _callout("summary", "Коротко", self.claims(doc.tldr, "tldr"))
+        lines += self.sections(doc)
+        lines += _section("Формулы и примеры", self.claims(doc.examples, "examples"))
+        lines += _callout("abstract", "Глоссарий", self.glossary(doc))
+        for i, q in enumerate(doc.qa):
             if self.fresh(q.question):
                 answer = [q.answer.strip()] if q.answer.strip() else []
-                lines += _callout("question", f"{q.question.strip()} {self.at(q.at)}", answer)
-        lines += _callout("info", "Что почитать", self.claims(doc.reading))
-        lines += _callout("warning", "Неразборчиво", self.claims(doc.unclear), folded=True)
+                title = f"{q.question.strip()} {self.at(q.at, f'qa.{i}')}"
+                lines += _callout("question", title, answer)
+        lines += _callout("info", "Что почитать", self.claims(doc.reading, "reading"))
+        lines += _callout(
+            "warning", "Неразборчиво", self.claims(doc.unclear, "unclear"), folded=True
+        )
         return lines + self.transcript_section()
 
+    def sections(self, doc: LectureDoc) -> list[str]:
+        lines: list[str] = []
+        for i, sec in enumerate(doc.sections):
+            theses = self.claims(sec.theses, f"sections.{i}.theses")
+            lines += [f"## {sec.title.strip()} {self.at(sec.at)}", "", *theses, ""]
+        return lines
+
+    def glossary(self, doc: LectureDoc) -> list[str]:
+        return [
+            f"- **{t.term.strip()}** — {t.definition.strip()} {self.at(t.at, f'glossary.{i}')}"
+            for i, t in enumerate(doc.glossary)
+            if self.fresh(f"термин {t.term}")
+        ]
+
     def lecture_debug(self, doc: LectureDoc) -> list[str]:
-        lines = _section("Коротко", self.claims(doc.tldr))
-        for sec in doc.sections:
-            lines += [f"## {sec.title.strip()} {self.at(sec.at)}", "", *self.claims(sec.theses), ""]
-        lines += _section(
-            "Глоссарий",
-            [
-                f"- **{t.term.strip()}** — {t.definition.strip()} {self.at(t.at)}"
-                for t in doc.glossary
-                if self.fresh(f"термин {t.term}")
-            ],
-        )
-        lines += _section("Формулы и примеры", self.claims(doc.examples))
+        lines = _section("Коротко", self.claims(doc.tldr, "tldr"))
+        lines += self.sections(doc)
+        lines += _section("Глоссарий", self.glossary(doc))
+        lines += _section("Формулы и примеры", self.claims(doc.examples, "examples"))
         qa: list[str] = []
-        for q in doc.qa:
+        for i, q in enumerate(doc.qa):
             if not self.fresh(q.question):
                 continue
-            qa.append(f"- **Вопрос:** {q.question.strip()} {self.at(q.at)}")
+            qa.append(f"- **Вопрос:** {q.question.strip()} {self.at(q.at, f'qa.{i}')}")
             if q.answer.strip():
                 qa.append(f"  **Ответ:** {q.answer.strip()}")
         lines += _section("Вопросы и ответы", qa)
-        lines += _section("Что почитать", self.claims(doc.reading))
-        lines += _section("Неразборчиво", self.claims(doc.unclear))
+        lines += _section("Что почитать", self.claims(doc.reading, "reading"))
+        lines += _section("Неразборчиво", self.claims(doc.unclear, "unclear"))
         return lines + self.transcript_section()
 
     def raw(self, doc: RawDoc) -> list[str]:
@@ -262,8 +289,9 @@ def render_note(
     profile: str,
     media: str | None = None,
     debug: bool = False,
+    report: Report | None = None,
 ) -> Path:
-    body = _Body(transcript, media, debug)
+    body = _Body(transcript, media, debug, report)
     if isinstance(document, LectureDoc):
         title = document.title.strip() or audio.source.stem
         lines = body.lecture(document)
@@ -285,6 +313,8 @@ def render_note(
             "llm_model": summary.model,
             "cost_usd": summary.cost_usd,
         }
+        if report is not None:
+            meta["verified"] = report.describe()
     else:
         # Файл назван по дате и имени записи — тема лекции в aliases, чтобы поиск и ссылки
         # Obsidian находили заметку по ней.
@@ -293,6 +323,9 @@ def render_note(
             "recorded": recorded,
             "duration": short_timecode(audio.duration),
         }
+        if report is not None and report.marks:
+            # «38/45» — сортируется и фильтруется в Dataview, а подробности — в callout'е ниже.
+            meta["verified"] = f"{report.confirmed}/{len(report.marks)}"
     if media is not None:
         meta["audio"] = f"[[{media}]]"
     meta["tags"] = ["summuraze"] if debug else ["summuraze", _PROFILE_TAGS.get(profile, profile)]
@@ -307,6 +340,9 @@ def render_note(
     ]
     if media is not None:
         head += [f"![[{media}]]", ""]  # плеер: слушать можно и там, где нет Media Extended
+    if report is not None and report.marks and not debug:
+        kind = "success" if report.count("ok") == len(report.marks) else "warning"
+        head += _callout(kind, "Проверено по записи", [report.describe()])
     _write_if_changed(layout.note, "\n".join([*head, *lines]).encode("utf-8"))
     return layout.note
 

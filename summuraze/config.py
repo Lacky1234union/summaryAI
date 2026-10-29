@@ -177,6 +177,18 @@ class VADSettings(BaseSettings):
     speech_pad_ms: int = Field(default=400, ge=0)
 
 
+class VerifySettings(BaseSettings):
+    """Проверка утверждений саммари по транскрипту (#22)."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_VERIFY_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # Ещё один запрос к той же модели: по API — копейки (транскрипт из кэша префикса), своей
+    # модели — пара минут на вердикты. false — заметка без пометок о проверке.
+    enabled: bool = True
+
+
 class LocalLLMSettings(BaseSettings):
     """Локальная модель для `--local` (#19): summuraze сам поднимает `llama-server` после ASR
     и гасит его после саммари.
@@ -302,6 +314,7 @@ class Settings(BaseSettings):
     record: RecordSettings = Field(default_factory=RecordSettings)
     asr: ASRSettings = Field(default_factory=ASRSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    verify: VerifySettings = Field(default_factory=VerifySettings)
     local_llm: LocalLLMSettings = Field(default_factory=LocalLLMSettings)
 
     # Локальный STT сам по себе приватности не даёт: саммари по API увозит транскрипт целиком.
