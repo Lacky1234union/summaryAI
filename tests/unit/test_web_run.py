@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -226,14 +227,21 @@ def _running_run(lecture: Path, pid: int) -> int:
 
 
 def test_cancel_sends_ctrl_c_to_summuraze_only(lecture: Path, client: TestClient) -> None:
-    ours = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "summuraze"])
+    ours = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "summuraze"],
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     foreign = subprocess.Popen(["sleep", "30"])
     try:
         rid = _running_run(lecture, foreign.pid)
         assert client.post(f"/api/recordings/{rid}/cancel").status_code == 409, "чужой pid"
         _running_run(lecture, ours.pid)
         assert client.post(f"/api/recordings/{rid}/cancel").status_code == 200
-        assert ours.wait(10) == 1, "KeyboardInterrupt — как Ctrl+C в терминале"
+        # Код выхода после KeyboardInterrupt — 1 или −SIGINT, смотря по сборке Python (в CI −2).
+        assert ours.wait(10) in (1, -signal.SIGINT)
+        assert ours.stderr is not None
+        assert "KeyboardInterrupt" in ours.stderr.read(), "как Ctrl+C в терминале"
     finally:
         ours.kill()
         foreign.kill()
