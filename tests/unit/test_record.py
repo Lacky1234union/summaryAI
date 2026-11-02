@@ -10,11 +10,15 @@ import os
 import shutil
 import signal
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+from summuraze.audio import pairs
 from summuraze.audio import record as rec
 from summuraze.audio.ingest import ingest
 from summuraze.cli import _meter, app
@@ -163,7 +167,53 @@ def test_meter() -> None:
     assert "микрофон ▮▮▮▮▮▮▮▮▯▯  -12 дБ" in line and "система ▯▯▯▯▯▯▯▯▯▯  тишина" in line
 
 
+def _fake_inhibit(path: Path, body: str, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Подменный systemd-inhibit: пишет свои аргументы и делает `body`."""
+    args = path.parent / "args"
+    path.write_text(f'#!/bin/sh\necho "$@" > {args}\n{body}\n')
+    path.chmod(0o755)
+    monkeypatch.setattr(rec.shutil, "which", lambda name: str(path))
+    return args
+
+
+def test_inhibit_held_and_released(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pid_file = tmp_path / "pid"
+    body = f'echo $$ > {pid_file}; while [ "${{1#--}}" != "$1" ]; do shift; done; exec "$@"'
+    args = _fake_inhibit(tmp_path / "systemd-inhibit", body, monkeypatch)
+    with rec.inhibit_sleep() as held:
+        assert held
+        line = args.read_text()
+        assert "--what=sleep:idle:handle-lid-switch" in line and "sleep infinity" in line
+        pid = int(pid_file.read_text())
+        os.kill(pid, 0)  # живой: блокировка держится
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)  # снята вместе с `sleep infinity`
+
+
+def test_inhibit_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Отказ polkit: systemd-inhibit выходит сразу — блокировки нет, запись идёт."""
+    _fake_inhibit(tmp_path / "systemd-inhibit", "exit 1", monkeypatch)
+    with rec.inhibit_sleep() as held:
+        assert not held
+
+
+def test_inhibit_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rec.shutil, "which", lambda name: None)
+    with rec.inhibit_sleep() as held:
+        assert not held
+
+
+@contextmanager
+def _no_inhibit(why: str = "") -> Iterator[bool]:
+    yield True
+
+
 class TestCLI:
+    @pytest.fixture(autouse=True)
+    def _keep_real_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Тесты не должны запрещать сон машине, на которой бегут."""
+        monkeypatch.setattr(rec, "inhibit_sleep", _no_inhibit)
+
     def _fake_inputs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """«Микрофон» — синтетическая речь, «система» — тишина; запись кончается сама."""
         # Без -re: в реальном времени здесь проверять нечего, а набор тестов ждал бы секунды.
@@ -224,3 +274,47 @@ class TestCLI:
         assert "микрофон: тишина 10 с" in result.output
         [recorded] = (tmp_path / "rec").glob("*.mka")
         assert recorded.stat().st_size > 0
+
+    def test_pair_stops_itself(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Конец пары — запись встаёт сама; время потока, поэтому без ожидания в реальном."""
+        quiet = ["-f", "lavfi", "-i", "sine=f=300:r=48000:d=600"]
+        monkeypatch.setattr(rec, "_pactl", lambda *a: "dev")
+        monkeypatch.setattr(rec, "pulse_inputs", lambda sources: [quiet, quiet][: len(sources)])
+        monkeypatch.setenv("SUMMURAZE_RECORD_DIR", str(tmp_path / "rec"))
+        seen: list[tuple[list[object], float, float]] = []
+
+        def soon(now: datetime, starts: list[object], *, minutes: float, margin: float) -> object:
+            seen.append((starts, minutes, margin))
+            return pairs.StopPlan(now + timedelta(seconds=3), None, "пара 13:00–14:20, стоп")
+
+        monkeypatch.setattr(pairs, "plan_stop", soon)
+        result = CliRunner().invoke(app, ["record", "--no-run", "--mic-only", "--pair"])
+        assert result.exit_code == 0, result.output
+        assert "пара 13:00–14:20, стоп. Ctrl+C — остановить раньше" in result.output
+        assert "Время вышло — останавливаю запись" in result.output
+        assert seen[0][1:] == (80, 10) and len(seen[0][0]) == 7, "сетка ВШЭ по умолчанию"
+        [recorded] = (tmp_path / "rec").glob("*.mka")
+        duration = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]
+            + [str(recorded)],
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert float(duration) < 600, "встала сама, а не по концу входа"
+
+    def test_bad_until(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SUMMURAZE_RECORD_DIR", str(tmp_path / "rec"))
+        result = CliRunner().invoke(app, ["record", "--no-run", "--until", "полтретьего"])
+        assert result.exit_code == 2 and "ЧЧ:ММ" in result.output
+        assert not (tmp_path / "rec").exists(), "до записи"
+
+    def test_no_inhibit_warns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        @contextmanager
+        def refused(why: str = "") -> Iterator[bool]:
+            yield False
+
+        self._fake_inputs(monkeypatch)
+        monkeypatch.setattr(rec, "inhibit_sleep", refused)
+        monkeypatch.setenv("SUMMURAZE_RECORD_DIR", str(tmp_path / "rec"))
+        result = CliRunner().invoke(app, ["record", "--no-run"])
+        assert "не закрывай крышку" in result.output
