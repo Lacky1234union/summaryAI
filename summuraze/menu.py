@@ -97,7 +97,9 @@ def _record() -> None:
     from summuraze import cli
 
     name = typer.prompt("Название (Enter — по дате)", default="", show_default=False).strip()
-    note = cli._record(name or None)
+    # Пара — основной случай (#67): забытая остановка стоит конца лекции или часа тишины.
+    pair = typer.confirm("Остановить в конце пары?", default=True)
+    note = cli._record(name or None, pair=pair)
     if note is not None:
         _offer_open(note)
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -249,6 +250,46 @@ class SilenceWatch:
             return levels.at - self._since >= self.minutes * 60
         self._since = None
         return False
+
+
+@contextmanager
+def inhibit_sleep(why: str = "идёт запись") -> Generator[bool, None, None]:
+    """Не засыпать и не реагировать на крышку, пока идёт запись (#67). False — не вышло.
+
+    Блокировку держит `systemd-inhibit` с `sleep infinity` внутри: снять её — убить группу.
+    Своя группа процессов — по той же причине, что у ffmpeg: Ctrl+C ловит Python, а не они.
+    """
+    binary = shutil.which("systemd-inhibit")
+    if binary is None:
+        yield False
+        return
+    proc = subprocess.Popen(
+        [
+            binary,
+            "--what=sleep:idle:handle-lid-switch",
+            "--who=summuraze",
+            f"--why={why}",
+            "--mode=block",
+            "sleep",
+            "infinity",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        # Отказ polkit — systemd-inhibit выходит сразу; живой через полсекунды — держит.
+        try:
+            proc.wait(0.5)
+        except subprocess.TimeoutExpired:
+            yield True
+        else:
+            yield False
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait()
 
 
 def record_name(directory: Path, name: str | None, now: Callable[[], float] = time.time) -> Path:

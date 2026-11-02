@@ -210,6 +210,16 @@ def record(
     no_run: Annotated[
         bool, typer.Option("--no-run", help="Только записать, без конспекта")
     ] = False,
+    pair: Annotated[
+        bool,
+        typer.Option(
+            "--pair", help="Остановиться в конце текущей пары + запас (SUMMURAZE_RECORD_PAIR_*)"
+        ),
+    ] = False,
+    until: Annotated[
+        str | None,
+        typer.Option("--until", metavar="ЧЧ:ММ", help="Остановиться в это время; важнее --pair"),
+    ] = None,
     debug: DebugOpt = False,
     local_only: LocalOnlyOpt = False,
     local: LocalOpt = False,
@@ -222,6 +232,8 @@ def record(
         terms=terms,
         mic_only=mic_only,
         no_run=no_run,
+        pair=pair,
+        until=until,
         debug=debug,
         local_only=local_only,
         local=local,
@@ -238,17 +250,36 @@ def _record(
     terms: Path | None = None,
     mic_only: bool = False,
     no_run: bool = False,
+    pair: bool = False,
+    until: str | None = None,
     debug: bool = False,
     local_only: bool = False,
     local: bool = False,
 ) -> Path | None:
     """Записать и, если не `no_run`, прогнать конвейер; вернуть путь заметки."""
+    from summuraze.audio import pairs
     from summuraze.audio import record as rec
     from summuraze.pipeline.orchestrator import Pipeline
 
     with _clean_errors():
         settings = _settings(lang, debug, local_only, local)
         cfg = settings.record
+        plan: pairs.StopPlan | None = None
+        if until is not None or pair:
+            now = datetime.now()
+            try:
+                plan = (
+                    pairs.until(now, until)
+                    if until is not None
+                    else pairs.plan_stop(
+                        now,
+                        [pairs.parse_hhmm(p) for p in cfg.pairs],
+                        minutes=cfg.pair_minutes,
+                        margin=cfg.pair_margin_minutes,
+                    )
+                )
+            except ValueError as e:
+                raise typer.BadParameter(str(e), param_hint="--until") from None
         if not no_run:
             # Пустой ключ или нет папки хранилища — узнать сейчас, а не после двухчасовой пары.
             with Pipeline(settings) as pipeline:
@@ -264,8 +295,23 @@ def _record(
                     err=True,
                 )
         path = rec.record_name(cfg.directory, name)
-        typer.echo(f"● Запись: {path}\n  Ctrl+C — остановить и сделать конспект.")
-        stopped_by_user = _record_loop(path, sources, cfg.bitrate_kbps, cfg.silence_stop_minutes)
+        typer.echo(f"● Запись: {path}")
+        if plan is not None:
+            typer.echo(f"  {plan.reason}. Ctrl+C — остановить раньше и сделать конспект.")
+        else:
+            typer.echo("  Ctrl+C — остановить и сделать конспект.")
+        with rec.inhibit_sleep() as held:
+            if not held:
+                typer.secho(
+                    "⚠ Не вышло запретить сон (нет systemd-inhibit или отказ polkit) — "
+                    "не закрывай крышку, пока идёт запись.",
+                    fg="yellow",
+                    err=True,
+                )
+            stop_after = (plan.stop - datetime.now()).total_seconds() if plan is not None else None
+            stopped_by_user = _record_loop(
+                path, sources, cfg.bitrate_kbps, cfg.silence_stop_minutes, stop_after
+            )
     if stopped_by_user:
         _absorb_echoed_sigint()
 
@@ -304,8 +350,14 @@ def _absorb_echoed_sigint(window: float = 2.0) -> None:
         signal.signal(signal.SIGINT, signal.default_int_handler)
 
 
-def _record_loop(path: Path, sources: list[Source], bitrate: int, silence_minutes: float) -> bool:
-    """Записывать до Ctrl+C или авто-стопа; True — остановил человек."""
+def _record_loop(
+    path: Path,
+    sources: list[Source],
+    bitrate: int,
+    silence_minutes: float,
+    stop_after: float | None = None,
+) -> bool:
+    """Записывать до Ctrl+C или авто-стопа (тишина, конец пары); True — остановил человек."""
     from summuraze.audio import record as rec
 
     watch = rec.SilenceWatch(silence_minutes)
@@ -348,6 +400,9 @@ def _record_loop(path: Path, sources: list[Source], bitrate: int, silence_minute
                     last_print = elapsed
                 if watch.update(levels):
                     typer.echo(f"\nТишина {silence_minutes:g} мин — останавливаю запись.")
+                    break
+                if stop_after is not None and elapsed >= stop_after:
+                    typer.echo("\nВремя вышло — останавливаю запись.")
                     break
     except KeyboardInterrupt:
         # Сигнал SIGINT уже пришёл — до конца остановки ffmpeg повторный не должен её сорвать.

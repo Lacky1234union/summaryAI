@@ -25,6 +25,8 @@ from urllib.parse import urlparse
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from summuraze.audio.pairs import parse_hhmm
+
 # Хосты, которые считаем локальными при проверке --local-only. Сравнение — с разобранным именем
 # хоста, а не подстрокой URL: `https://evil.com/?localhost` локальным не станет.
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1", "host.docker.internal"})
@@ -112,6 +114,18 @@ class RecordSettings(BaseSettings):
     # Авто-стоп, если все дорожки молчат дольше стольких минут (забыл остановить после пары).
     # 0 — не останавливать.
     silence_stop_minutes: float = Field(default=15, ge=0)
+    # `record --pair` (#67): начала пар, длительность занятия и запас после конца пары.
+    # По умолчанию — сетка НИУ ВШЭ; JSON-списком: ["09:30","11:10",…].
+    pairs: list[str] = ["09:30", "11:10", "13:00", "14:40", "16:20", "18:10", "19:40"]
+    pair_minutes: float = Field(default=80, gt=0, le=300)
+    pair_margin_minutes: float = Field(default=10, ge=0, le=60)
+
+    @field_validator("pairs")
+    @classmethod
+    def _pairs_are_times(cls, v: list[str]) -> list[str]:
+        for item in v:
+            parse_hhmm(item)
+        return v
 
     @field_validator("mic", "system", mode="before")
     @classmethod

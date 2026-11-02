@@ -101,7 +101,7 @@ def test_interrupt_returns_to_menu(tty: None, monkeypatch: pytest.MonkeyPatch) -
         raise KeyboardInterrupt
 
     monkeypatch.setattr(cli, "_record", interrupted)
-    result = runner.invoke(app, [], input="1\nлекция\n0\n")
+    result = runner.invoke(app, [], input="1\nлекция\n\n0\n")
     assert result.exit_code == 0
     assert "Прервано." in result.output and result.output.count("Что делаем?") == 2
 
@@ -109,17 +109,17 @@ def test_interrupt_returns_to_menu(tty: None, monkeypatch: pytest.MonkeyPatch) -
 def test_record_passes_name_and_offers_note(
     tty: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, opened: list[str]
 ) -> None:
-    seen: list[str | None] = []
+    seen: list[tuple[str | None, object]] = []
     note = tmp_path / "n.md"
 
     def fake(name: str | None, **kw: object) -> Path:
-        seen.append(name)
+        seen.append((name, kw.get("pair")))
         return note
 
     monkeypatch.setattr(cli, "_record", fake)
-    result = runner.invoke(app, [], input="1\n\nn\n1\nЦОС 3\nn\n0\n")
+    result = runner.invoke(app, [], input="1\n\n\nn\n1\nЦОС 3\nn\nn\n0\n")
     assert result.exit_code == 0, result.output
-    assert seen == [None, "ЦОС 3"], "пустое имя — по дате"
+    assert seen == [(None, True), ("ЦОС 3", False)], "пустое имя — по дате; пара — по умолчанию"
     assert opened == []
 
 
