@@ -226,15 +226,24 @@ class ScriptedLLM(EchoLLM):
 
     name = "scripted"
 
-    def __init__(self, *replies: str) -> None:
-        super().__init__()
+    def __init__(self, *replies: str | tuple[str, bool], context: int = 1_000_000) -> None:
+        """Ответ — текст или (текст, обрезан ли лимитом)."""
+        super().__init__(context)
         self.replies = list(replies)
         self.calls = 0
+        self.limits: list[int] = []
 
     def complete(self, **kw: Any) -> LLMResult:
         self.calls += 1
+        self.limits.append(kw["max_tokens"])
+        reply = self.replies.pop(0)
+        text, truncated = reply if isinstance(reply, tuple) else (reply, False)
         return LLMResult(
-            text=self.replies.pop(0), model="ds", usage=TokenUsage(input=1, output=1), cost_usd=0.01
+            text=text,
+            model="ds",
+            usage=TokenUsage(input=1, output=1),
+            cost_usd=0.01,
+            truncated=truncated,
         )
 
 
@@ -267,6 +276,38 @@ class TestStage:
         llm = ScriptedLLM(json.dumps({"blocks": []}), raw)
         stages.build_summary(tmp_path, llm, TRANSCRIPT, get_profile("raw"))
         assert llm.calls == 2
+
+    def test_truncated_is_retried_with_bigger_limit(self, tmp_path: Path) -> None:
+        """Рассуждение съело лимит, JSON оборван (#63, 2026-11-02) — повтор с лимитом вдвое."""
+        full = json.dumps(LECTURE)
+        llm = ScriptedLLM((full[: len(full) // 2], True), full)
+        stages.build_summary(tmp_path, llm, TRANSCRIPT, get_profile("lecture"))
+        assert llm.limits == [16_000, 32_000]
+        result, _ = stages.load_summary(tmp_path, get_profile("lecture"))
+        assert result.cost_usd == pytest.approx(0.02), "обрезанный ответ тоже оплачен"
+
+    def test_truncated_twice_fails(self, tmp_path: Path) -> None:
+        cut = json.dumps(LECTURE)[:50]
+        llm = ScriptedLLM((cut, True), (cut, True))
+        with pytest.raises(SummaryFormatError, match="обрезан лимитом в 32000"):
+            stages.build_summary(tmp_path, llm, TRANSCRIPT, get_profile("lecture"))
+        assert llm.calls == 2, "лимит растёт один раз, не до бесконечности"
+        assert not list(tmp_path.iterdir())
+
+    def test_grown_limit_capped_by_context(self, tmp_path: Path) -> None:
+        """Малый контекст: вдвое не влезает — лимит растёт до того, что осталось после запроса."""
+        cut = json.dumps(LECTURE)[:50]
+        llm = ScriptedLLM((cut, True), (cut, True), context=1400)
+        with pytest.raises(SummaryFormatError, match="обрезан лимитом"):
+            stages.build_summary(tmp_path, llm, TRANSCRIPT, get_profile("lecture"))
+        first, second = llm.limits
+        assert first < second < 2 * first
+
+    def test_off_schema_is_not_retried(self, tmp_path: Path) -> None:
+        llm = ScriptedLLM("не JSON")
+        with pytest.raises(SummaryFormatError, match="не по схеме в 16000"):
+            stages.build_summary(tmp_path, llm, TRANSCRIPT, get_profile("lecture"))
+        assert llm.calls == 1
 
     def test_document_saved_with_result(self, tmp_path: Path) -> None:
         prof = get_profile("lecture")
@@ -342,6 +383,26 @@ def test_reasoning_switch(reasoning: bool | None, body: dict[str, bool] | None) 
     llm.complete(system="s", prefix="p", question="q", max_tokens=10)
     assert sent[0].get("reasoning") == body
     assert LLMSettings().openrouter_reasoning is False
+
+
+def test_truncation_reported_by_adapter() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": '{"ti'}, "finish_reason": "length"}]}
+        )
+
+    llm = OpenAICompatLLM(
+        LLMSettings(api_key=SecretStr("k")),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert llm.complete(system="s", prefix="p", question="q", max_tokens=10).truncated
+
+
+def test_lecture_prompt_never_allows_empty_core() -> None:
+    """«Пустой список — правильный ответ» без оговорки — и модель пустила пустыми все разделы."""
+    system = get_profile("lecture").system
+    assert "tldr и sections есть у любой лекции" in system
+    assert system.index("tldr и sections") < system.index("пустой список — правильный ответ")
 
 
 def test_repeated_thoughts_rendered_once(tmp_path: Path) -> None:

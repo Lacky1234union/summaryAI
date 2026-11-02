@@ -141,7 +141,8 @@ class OpenAICompatLLM:
             text = choice["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError(f"{self._base_url} вернул ответ без текста: {str(data)[:300]}") from e
-        if choice.get("finish_reason") == "length":
+        truncated = choice.get("finish_reason") == "length"
+        if truncated:
             logger.warning(
                 "ответ модели обрезан лимитом в {} токенов — конец документа может отсутствовать",
                 max_tokens,
@@ -156,6 +157,7 @@ class OpenAICompatLLM:
             cost_usd=float(billed)
             if billed is not None
             else cost_usd(self._base_url, self.model, usage, at, local=self._local),
+            truncated=truncated,
         )
 
     def _post(self, body: dict[str, Any]) -> dict[str, Any]:
