@@ -138,6 +138,8 @@ class LLMResult(BaseModel):
     model: str
     usage: TokenUsage
     cost_usd: float | None = None
+    # Ответ упёрся в max_tokens (`finish_reason: length`): JSON, скорее всего, оборван (#63).
+    truncated: bool = False
 
 
 @runtime_checkable

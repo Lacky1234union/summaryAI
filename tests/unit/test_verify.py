@@ -503,9 +503,30 @@ def test_truncated_judge_is_asked_about_the_rest(tmp_path: Path) -> None:
 
 
 def test_judge_off_schema_fails_cleanly(tmp_path: Path) -> None:
+    calls: list[int] = []
+
+    def reply(**kw: Any) -> LLMResult:
+        calls.append(1)
+        return LLMResult(text="не JSON", model="m", usage=TokenUsage(input=1, output=1))
+
     llm = EchoLLM()
-    llm.complete = lambda **kw: LLMResult(  # type: ignore[method-assign]
-        text="не JSON", model="m", usage=TokenUsage(input=1, output=1)
-    )
-    with pytest.raises(stages.SummaryFormatError, match="не по схеме проверки"):
+    llm.complete = reply  # type: ignore[method-assign]
+    with pytest.raises(stages.SummaryFormatError, match="раза ответила не по схеме проверки"):
         stages.build_verify(tmp_path, llm, _transcript(), _doc())
+    assert len(calls) == 1 + verify.RETRIES
+    assert not list(tmp_path.iterdir())
+
+
+def test_empty_judge_answer_is_asked_again(tmp_path: Path) -> None:
+    """DeepSeek-судья ответил пустой строкой (#63, 2026-11-02) — переспросить, а не падать."""
+
+    class Blank(Judge):
+        def complete(self, **kw: Any) -> LLMResult:
+            result = super().complete(**kw)
+            return result.model_copy(update={"text": ""}) if len(self.calls) == 1 else result
+
+    llm = Blank()
+    stages.build_verify(tmp_path, llm, _transcript(), _doc())
+    report, result = stages.load_verify(tmp_path)
+    assert len(llm.calls) == 2 and report.count("unchecked") == 0
+    assert result is not None

@@ -45,8 +45,10 @@ VAD_VERSION = 1
 ASR_VERSION = 2
 # 2: сомнительные сегменты помечены в префиксе, правило про пометку — в system (#12).
 # 3: ответ — JSON по схеме профиля, в артефакте разобранный документ (#17).
+# 4: пустой документ — ошибка с повтором, а не саммари (#63); в кэше могли остаться пустые.
+#    Обрезанный ответ — повтор с удвоенным лимитом.
 # Окна (#21) версию не поднимают: у них своя, `windows.VERSION`, в ключе длинных записей.
-SUMMARY_VERSION = 3
+SUMMARY_VERSION = 4
 
 _AUDIO = "audio.wav"
 _AUDIO_INFO = "audio.json"
@@ -128,6 +130,10 @@ def _line(s: Segment) -> str:
     return f"[{fmt_timecode(s.start)}] {SUSPECT_MARK + ' ' if s.suspect else ''}{s.text.strip()}"
 
 
+# Пустой документ по схеме — сбой провайдера, а не ответ: OpenRouter может отдать повтор другому.
+EMPTY_RETRIES = 2
+
+
 class SummaryFormatError(RuntimeError):
     """Модель ответила не по схеме профиля — такой ответ в кэш не кладём."""
 
@@ -156,6 +162,7 @@ def build_summary(
             prefix,
             profile.question,
             plan.output,
+            whole=True,
         )
     else:
         result, document, plan = _windowed(llm, transcript, profile, plan, parts)
@@ -180,22 +187,84 @@ def _ask(
     prefix: str,
     question: str,
     max_tokens: int,
+    *,
+    whole: bool = False,
 ) -> tuple[LLMResult, BaseModel]:
-    result = llm.complete(
-        system=system,
-        prefix=prefix,
-        question=question,
-        max_tokens=max_tokens,
-        schema=strict_schema(document),
+    """`whole` — документ всей записи: пустым он быть не может. Карта окна — может (тишина).
+
+    Обрезанный лимитом ответ — один повтор с удвоенным лимитом, если контекст позволяет:
+    рассуждающая модель тратит на рассуждение тот же `max_tokens`, и 16k на лекцию не хватает
+    (#63, 2026-11-02: 26.7k токенов ответа на 71 минуту)."""
+    spent: list[LLMResult] = []
+    empty = 0
+    grown = False
+    while True:
+        result = llm.complete(
+            system=system,
+            prefix=prefix,
+            question=question,
+            max_tokens=max_tokens,
+            schema=strict_schema(document),
+        )
+        spent.append(result)
+        try:
+            parsed = document.model_validate_json(result.text)
+        except ValidationError as e:
+            more = (
+                _grown_limit(llm, [prefix, system, question], max_tokens)
+                if result.truncated and not grown
+                else max_tokens
+            )
+            if more > max_tokens:
+                logger.warning(
+                    "ответ {} обрезан лимитом в {} токенов — повтор с лимитом {}",
+                    what,
+                    max_tokens,
+                    more,
+                )
+                max_tokens, grown = more, True
+                continue
+            cause = "обрезан лимитом" if result.truncated else "не по схеме"
+            raise SummaryFormatError(
+                f"модель {result.model} ответила не по схеме {what} ({cause} в {max_tokens} "
+                f"токенов, либо сервер не поддерживает structured outputs): "
+                f"{e.errors()[0]['msg']}; начало ответа: {result.text[:200]!r}"
+            ) from e
+        # Заглушка отвечает пустым документом по определению — на ней держится прогон без сети.
+        if not whole or llm.name == "echo" or not _hollow(parsed):
+            return combined(spent), parsed
+        if empty == EMPTY_RETRIES:
+            raise SummaryFormatError(
+                f"модель {result.model} {EMPTY_RETRIES + 1} раза подряд вернула пустой документ "
+                f"{what} — по схеме, но без единого утверждения; начало ответа: "
+                f"{result.text[:200]!r}"
+            )
+        empty += 1
+        logger.warning(
+            "модель {} вернула пустой документ {} — повтор {}/{}",
+            result.model,
+            what,
+            empty,
+            EMPTY_RETRIES,
+        )
+
+
+def _grown_limit(llm: LLMProvider, parts: list[str], max_tokens: int) -> int:
+    """Вдвое больше, но не больше того, что остаётся в контексте после запроса."""
+    text = "\n".join(parts)
+    counted = llm.count_tokens(text)
+    prompt = (counted if counted is not None else budget.estimate_tokens(text)) + (
+        budget.TEMPLATE_TOKENS
     )
-    try:
-        return result, document.model_validate_json(result.text)
-    except ValidationError as e:
-        raise SummaryFormatError(
-            f"модель {result.model} ответила не по схеме {what} "
-            f"(обрезан ответ или сервер не поддерживает structured outputs): "
-            f"{e.errors()[0]['msg']}; начало ответа: {result.text[:200]!r}"
-        ) from e
+    return min(2 * max_tokens, llm.context_window - prompt)
+
+
+def _hollow(document: BaseModel) -> bool:
+    """Ни одного утверждения (у `raw` — ни одного блока): конспекта нет, есть пустой шаблон.
+    Разделы с заголовками без тезисов — тоже пустой: DeepSeek так отвечает (#63)."""
+    if isinstance(document, RawDoc):
+        return not document.blocks
+    return not verify.has_claims(document)
 
 
 # Окно меньше — карта из него почти пустая, а окон столько, что второй проход утонет в картах.
@@ -301,6 +370,7 @@ def _windowed(
             prefix,
             profile.question,
             plan.output,
+            whole=True,
         )
         results.append(result)
     return combined(results), document, replace(plan, windows=len(cut), final=final)
@@ -348,7 +418,7 @@ def build_verify(out: Path, llm: LLMProvider, transcript: Transcript, document: 
             room = plan.limit - budget.estimate_tokens(system + question)
             groups = _verify_groups(llm, transcript, asked, room)
         for i, (group_prefix, group) in enumerate(groups, 1):
-            for _ in range(1 + verify.RETRIES):
+            for attempt in range(1 + verify.RETRIES):
                 result = llm.complete(
                     system=system,
                     prefix=group_prefix,
@@ -356,14 +426,22 @@ def build_verify(out: Path, llm: LLMProvider, transcript: Transcript, document: 
                     max_tokens=min(verify.output_tokens(len(group)), plan.output),
                     schema=strict_schema(verify.Verdicts),
                 )
+                results.append(result)
                 verdicts = verify.parse(result.text)
                 if verdicts is None:
                     window = "" if len(groups) == 1 else f" (окно {i})"
-                    raise SummaryFormatError(
-                        f"модель {result.model} ответила не по схеме проверки{window}: "
-                        f"начало ответа: {result.text[:200]!r}"
+                    if attempt == verify.RETRIES:
+                        raise SummaryFormatError(
+                            f"модель {result.model} {verify.RETRIES + 1} раза ответила не по "
+                            f"схеме проверки{window}: начало ответа: {result.text[:200]!r}"
+                        )
+                    # Пустая строка вместо вердиктов — сбой провайдера, как пустой конспект (#63).
+                    logger.warning(
+                        "проверка{}: ответ не по схеме ({!r}) — переспрашиваю",
+                        window,
+                        result.text[:80],
                     )
-                results.append(result)
+                    continue
                 marks |= verify.judge(group, verdicts, transcript)
                 group = [c for c in group if marks[c.path].status == "unchecked"]
                 if not group:
