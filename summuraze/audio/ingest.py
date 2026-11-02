@@ -104,6 +104,11 @@ def _audio_map(count: int, stream: int | None) -> list[str]:
     return ["-filter_complex", f"{inputs}amix=inputs={count}:normalize=0[mix]", "-map", "[mix]"]
 
 
+def duration(source: Path) -> float | None:
+    """Длительность по контейнеру — для оценки до ингеста (#23); `None` — не знает и он."""
+    return _float_or_none(_probe(source).get("format", {}).get("duration"))
+
+
 def _probe(source: Path) -> dict[str, Any]:
     out = _run(
         [

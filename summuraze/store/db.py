@@ -390,6 +390,25 @@ class Database:
             for row in rows
         }
 
+    def recording_by_path(self, path: Path) -> int | None:
+        row = self._conn.execute(
+            "SELECT id FROM recordings WHERE path = ?", (str(path.resolve()),)
+        ).fetchone()
+        return row["id"] if row is not None else None
+
+    def cost_per_second(self, llm_model: str) -> list[float]:
+        """Сколько стоила секунда записи в прошлых прогонах модели — по факту, с проверкой и
+        окнами. Прогоны из кэша ($0) не в счёт: они не о цене модели."""
+        rows = self._conn.execute(
+            """
+            SELECT r.cost_usd / rec.duration AS rate FROM runs r
+            JOIN recordings rec ON rec.id = r.recording_id
+            WHERE r.llm_model = ? AND r.cost_usd > 0 AND rec.duration > 0
+            """,
+            (llm_model,),
+        ).fetchall()
+        return [row["rate"] for row in rows]
+
     # ── Согласие на отправку наружу ─────────────────────────────────────────
 
     def has_consent(self, host: str) -> bool:

@@ -102,19 +102,27 @@ function statusNode(card) {
 
 // ── Список записей ────────────────────────────────────────────────────
 
-async function showList() {
+function showList() {
   crumb.textContent = "записи";
   document.title = "summuraze";
+  // Форма запуска — вне перерисовки: опрос списка не должен стирать то, что человек выбирает.
+  const list = el("div", {});
+  app.replaceChildren(launchPanel(null), list);
+  refreshList(list);
+}
+
+async function refreshList(list) {
   let data;
   try {
     data = await api("/api/recordings");
   } catch (e) {
-    app.replaceChildren(el("p", { class: "error" }, `Не загрузить список: ${e.message}`));
+    list.replaceChildren(el("p", { class: "error" }, `Не загрузить список: ${e.message}`));
     return;
   }
+  if (!list.isConnected) return; // пока ждали ответа, ушли на другую страницу
   if (!data.items.length) {
-    app.replaceChildren(
-      el("p", { class: "muted" }, "Записей пока нет. Запиши лекцию: summuraze record, или прогони файл: summuraze run <файл>."),
+    list.replaceChildren(
+      el("p", { class: "muted" }, "Записей пока нет. Загрузи файл выше, запиши лекцию: summuraze record, или прогони файл: summuraze run <файл>."),
     );
     return;
   }
@@ -140,7 +148,8 @@ async function showList() {
       el("td", { class: "num opt" }, money(c.cost_usd)),
     ),
   );
-  app.replaceChildren(
+  clearInterval(ticker);
+  list.replaceChildren(
     el(
       "table",
       { class: "list" },
@@ -163,7 +172,165 @@ async function showList() {
   );
   startTicker(data.now);
   const busy = data.items.some((c) => c.status === "running");
-  timer = setTimeout(route, busy ? 2000 : 15000);
+  timer = setTimeout(() => refreshList(list), busy ? 2000 : 15000);
+}
+
+// ── Запуск прогона ────────────────────────────────────────────────────
+
+// Форма «сделать конспект»: на списке — с выбором файла, на странице записи — для неё же.
+function launchPanel(fixedPath) {
+  const msg = el("p", { class: "error" });
+  const opts = el("div", {});
+  const pick = async (path) => {
+    msg.textContent = "";
+    opts.replaceChildren(el("p", { class: "muted" }, "Смотрю запись…"));
+    try {
+      const o = await api(`/api/options?path=${encodeURIComponent(path)}`);
+      opts.replaceChildren(renderOptions(o, msg));
+    } catch (e) {
+      opts.replaceChildren();
+      msg.textContent = e.message;
+    }
+  };
+  if (fixedPath) {
+    pick(fixedPath);
+    return el("section", { class: "launch" }, el("h2", {}, "Сделать заново"), opts, msg);
+  }
+
+  const select = el("select", { onchange: () => select.value && pick(select.value) });
+  select.append(el("option", { value: "" }, "— выбери запись —"));
+  api("/api/files")
+    .then((d) => {
+      for (const f of d.items) {
+        const fresh = f.recording_id ? "" : " · новая";
+        const size = `${(f.size / 2 ** 20).toFixed(0)} МБ`;
+        select.append(el("option", { value: f.path }, `${f.name} · ${localDate(f.modified * 1000)} · ${size}${fresh}`));
+      }
+      if (!d.items.length) select.append(el("option", { disabled: true }, `в ${d.folder} записей нет`));
+    })
+    .catch((e) => (msg.textContent = `Не прочитать папку записей: ${e.message}`));
+
+  const file = el("input", { type: "file", accept: "audio/*,video/*", hidden: true });
+  const uploadButton = el("button", { type: "button", class: "secondary", onclick: () => file.click() }, "Загрузить файл…");
+  file.addEventListener("change", async () => {
+    const f = file.files[0];
+    if (!f) return;
+    msg.textContent = "";
+    uploadButton.disabled = true;
+    uploadButton.textContent = `Загружаю ${f.name}…`;
+    try {
+      const r = await fetch(`/api/upload?name=${encodeURIComponent(f.name)}`, { method: "PUT", body: f });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail);
+      select.append(el("option", { value: d.path }, `${d.name} · загружена`));
+      select.value = d.path;
+      pick(d.path);
+    } catch (e) {
+      msg.textContent = `Не загрузить: ${e.message}`;
+    } finally {
+      uploadButton.disabled = false;
+      uploadButton.textContent = "Загрузить файл…";
+      file.value = "";
+    }
+  });
+  return el(
+    "section",
+    { class: "launch" },
+    el("h2", {}, "Новый конспект"),
+    el("div", { class: "row" }, select, uploadButton, file),
+    opts,
+    msg,
+  );
+}
+
+function renderOptions(o, msg) {
+  const profile = el("select", {}, o.profiles.map((p) => el("option", { value: p.id }, p.title)));
+  let chosen = o.providers.find((p) => p.ready) || null;
+  const consentBox = el("input", { type: "checkbox" });
+  const consentText = el("span", {});
+  const consentRow = el("label", { class: "consent" }, consentBox, consentText);
+  const go = el("button", { type: "button", class: "primary" }, "Сделать конспект");
+
+  const providers = o.providers.map((p) => {
+    const price = p.usd === null ? "цена неизвестна" : `≈ ${money(p.usd)}`;
+    return el(
+      "label",
+      { class: `provider${p.ready ? "" : " off"}` },
+      el("input", {
+        type: "radio",
+        name: "provider",
+        value: p.id,
+        checked: p === chosen,
+        disabled: !p.ready,
+        onchange: () => {
+          chosen = p;
+          sync();
+        },
+      }),
+      el(
+        "span",
+        {},
+        el("b", {}, p.title),
+        ` — ${p.model} · ${p.host}`,
+        el("div", { class: "sub" }, p.ready ? `${price} · ${p.basis}` : p.problem),
+      ),
+    );
+  });
+
+  function sync() {
+    const need = Boolean(chosen && chosen.consent_needed);
+    consentRow.hidden = !need;
+    if (need) consentText.textContent = ` разрешаю отправлять текст транскрипта на ${chosen.host} — ответ запомню; аудио не уходит никогда`;
+    go.disabled = !chosen || (need && !consentBox.checked);
+  }
+  consentBox.addEventListener("change", sync);
+
+  go.addEventListener("click", async () => {
+    msg.textContent = "";
+    go.disabled = true;
+    go.textContent = "Запускаю…";
+    try {
+      const r = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: o.path, profile: profile.value, provider: chosen.id, consent: consentBox.checked }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail);
+      const target = `#/r/${d.recording_id}`;
+      if (location.hash === target) route();
+      else location.hash = target;
+    } catch (e) {
+      msg.textContent = e.message;
+      go.textContent = "Сделать конспект";
+      sync();
+    }
+  });
+  sync();
+  return el(
+    "div",
+    { class: "options" },
+    o.duration ? el("div", { class: "meta" }, `Длительность ${clock(o.duration)}`) : null,
+    el("label", { class: "row" }, "Что сделать: ", profile),
+    el("div", { class: "providers" }, providers),
+    consentRow,
+    go,
+  );
+}
+
+function progressContent(card) {
+  const stop = el("button", { type: "button", class: "secondary" }, "Остановить");
+  stop.addEventListener("click", async () => {
+    if (!confirm("Остановить прогон? Готовые стадии останутся в кэше.")) return;
+    stop.disabled = true;
+    const r = await fetch(`/api/recordings/${card.id}/cancel`, { method: "POST" });
+    stop.textContent = r.ok ? "останавливаю…" : "не остановить";
+  });
+  return ["Идёт обработка: ", statusNode(card), " ", stop];
+}
+
+function logDetails(launch, title) {
+  return el("details", { class: "log" }, el("summary", {}, title), el("pre", {}, launch.log || "лог пуст"));
 }
 
 // ── Страница записи ───────────────────────────────────────────────────
@@ -210,12 +377,25 @@ async function showRecording(id) {
   ].filter(Boolean);
 
   const banners = [];
-  const progress = el("div", { class: "banner" }, "Идёт обработка: ", statusNode(card));
-  if (card.status === "running") {
+  const launch = data.launch;
+  // Процесс запущен, но прогона в БД ещё нет: поднимается Python, считается хеш файла.
+  const starting = launch && card.run_id === launch.previous_run;
+  const progress = el("div", { class: "banner" }, ...progressContent(card));
+  if (starting && launch.running) {
+    banners.push(el("div", { class: "banner" }, "Запускается…"));
+  } else if (starting) {
+    banners.push(el("div", { class: "banner bad" }, `Прогон не запустился (код ${launch.code}).`, logDetails(launch, "лог")));
+  } else if (card.status === "running") {
     banners.push(progress);
   } else if (card.status === "failed" || card.status === "interrupted") {
-    banners.push(el("div", { class: "banner bad" }, statusNode(card), card.error ? ` — ${card.error}` : ""));
+    const log = launch && launch.code ? logDetails(launch, "лог прогона") : null;
+    banners.push(el("div", { class: "banner bad" }, statusNode(card), card.error ? ` — ${card.error}` : "", log));
   }
+  const again = el("div", {});
+  const againButton =
+    card.status === "running" || (starting && launch.running)
+      ? null
+      : el("button", { type: "button", class: "link", onclick: () => again.replaceChildren(launchPanel(card.path)) }, "Сделать заново…");
   if (!data.audio) {
     banners.push(el("div", { class: "banner warn" }, "Звука нет: удалён по сроку хранения или из кэша — таймкоды без перехода."));
   }
@@ -244,13 +424,15 @@ async function showRecording(id) {
 
   const transcript = renderTranscript(data, seek);
   app.replaceChildren(
-    el("div", { class: "player" }, audio, el("div", { class: "meta" }, meta.join(" · "))),
+    el("div", { class: "player" }, audio, el("div", { class: "meta" }, meta.join(" · "), againButton ? " · " : "", againButton)),
     ...banners,
+    again,
     el("div", { class: "columns" }, doc, transcript.node),
   );
   if (audio) follow(audio, transcript);
   startTicker(data.now);
-  if (card.status === "running") timer = setTimeout(() => watchRun(id, progress), 3000);
+  if (starting && launch.running) timer = setTimeout(route, 2000);
+  else if (card.status === "running") timer = setTimeout(() => watchRun(id, progress), 3000);
 }
 
 // Пока прогон идёт — обновлять только строку статуса: перерисовка страницы сбросила бы плеер.
@@ -267,7 +449,7 @@ async function watchRun(id, progress) {
     return;
   }
   clearInterval(ticker);
-  progress.replaceChildren("Идёт обработка: ", statusNode(data.card));
+  progress.replaceChildren(...progressContent(data.card));
   startTicker(data.now);
   timer = setTimeout(() => watchRun(id, progress), 3000);
 }
