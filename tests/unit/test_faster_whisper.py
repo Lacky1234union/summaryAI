@@ -134,6 +134,7 @@ class TestAdapter:
         assert call["samples"] == 10 * SR
         assert call["vad_filter"] is False, "VAD — отдельная стадия, второй раз резать нельзя"
         assert call["word_timestamps"] is True
+        assert call["condition_on_previous_text"] is False, "#70: иначе текст рвётся на обрывки"
 
     def test_words_return_to_source_time_and_split_at_gap(
         self, fake: type[FakeModel], tmp_path: Path

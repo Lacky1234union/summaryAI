@@ -18,6 +18,10 @@
 он не влияет вовсе (замер в BENCHMARKS.md). `hotwords` подставляется в каждое окно, но длиннее
 `HOTWORDS_MAX_TOKENS` ломает распознавание — лишние термины отрезаются с предупреждением.
 
+`condition_on_previous_text` выключен (#70): окно не получает текст предыдущего. На лекции с
+далёким микрофоном с ним текст распадался на сегменты по слову и терял четверть речи; `hotwords`
+от этого не зависит — подставляется в каждое окно и без прошлого текста.
+
 Refs #11
 """
 
@@ -116,6 +120,9 @@ class FasterWhisperASR:
             language=language,
             word_timestamps=True,
             vad_filter=False,
+            # С текстом прошлого окна в промпте Whisper на длинной склейке плохого звука
+            # сваливается в обрывки по 1–2 слова и не выходит из них до конца записи (#70).
+            condition_on_previous_text=False,
             hotwords=self._hotwords(terms or []),
         )
         segments = [s for seg in raw for s in _to_source(seg, timeline)]
