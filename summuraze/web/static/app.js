@@ -6,6 +6,8 @@
 const app = document.getElementById("app");
 const crumb = document.getElementById("crumb");
 let timer = null; // опрос сервера, пока что-то идёт
+let editorDirty = false;
+let currentHash = location.hash;
 let ticker = null; // секундомер стадии
 
 const STATUS = {
@@ -107,14 +109,18 @@ function showList() {
   document.title = "summuraze";
   // Форма запуска — вне перерисовки: опрос списка не должен стирать то, что человек выбирает.
   const list = el("div", {});
-  app.replaceChildren(launchPanel(null), list);
-  refreshList(list);
+  const queue = el("section", { class: "queue" });
+  app.replaceChildren(launchPanel(null), queue, list);
+  refreshList(list, queue);
 }
 
-async function refreshList(list) {
+async function refreshList(list, queue) {
   let data;
   try {
     data = await api("/api/recordings");
+    const jobs = await api("/api/queue");
+    if (!queue.isConnected) return;
+    renderQueue(queue, jobs);
   } catch (e) {
     list.replaceChildren(el("p", { class: "error" }, `Не загрузить список: ${e.message}`));
     return;
@@ -124,6 +130,7 @@ async function refreshList(list) {
     list.replaceChildren(
       el("p", { class: "muted" }, "Записей пока нет. Загрузи файл выше, запиши лекцию: summuraze record, или прогони файл: summuraze run <файл>."),
     );
+    timer = setTimeout(() => refreshList(list, queue), 3000);
     return;
   }
   const rows = data.items.map((c) =>
@@ -172,7 +179,7 @@ async function refreshList(list) {
   );
   startTicker(data.now);
   const busy = data.items.some((c) => c.status === "running");
-  timer = setTimeout(() => refreshList(list), busy ? 2000 : 15000);
+  timer = setTimeout(() => refreshList(list, queue), busy ? 2000 : 5000);
 }
 
 // ── Запуск прогона ────────────────────────────────────────────────────
@@ -249,7 +256,7 @@ function renderOptions(o, msg) {
   const consentBox = el("input", { type: "checkbox" });
   const consentText = el("span", {});
   const consentRow = el("label", { class: "consent" }, consentBox, consentText);
-  const go = el("button", { type: "button", class: "primary" }, "Сделать конспект");
+  const go = el("button", { type: "button", class: "primary" }, "В очередь");
 
   const providers = o.providers.map((p) => {
     const price = p.usd === null ? "цена неизвестна" : `≈ ${money(p.usd)}`;
@@ -377,6 +384,8 @@ async function showRecording(id) {
   ].filter(Boolean);
 
   const banners = [];
+  const queued = data.queue_job;
+  if (queued && queued.status === "pending") banners.push(el("div", { class: "banner" }, "Запись ожидает обработки в очереди"));
   const launch = data.launch;
   // Процесс запущен, но прогона в БД ещё нет: поднимается Python, считается хеш файла.
   const starting = launch && card.run_id === launch.previous_run;
@@ -422,16 +431,21 @@ async function showRecording(id) {
     doc.append(el("p", { class: "meta" }, "Заметка Obsidian: ", data.notes.join(", ")));
   }
 
+  const tools = el("section", { class: "note-tools" });
+  loadNoteTools(id, tools, doc, tc, Boolean(data.document));
   const transcript = renderTranscript(data, seek);
   app.replaceChildren(
     el("div", { class: "player" }, audio, el("div", { class: "meta" }, meta.join(" · "), againButton ? " · " : "", againButton)),
     ...banners,
     again,
+    tools,
     el("div", { class: "columns" }, doc, transcript.node),
   );
   if (audio) follow(audio, transcript);
   startTicker(data.now);
-  if (starting && launch.running) timer = setTimeout(route, 2000);
+  if (queued && queued.status === "pending") timer = setTimeout(route, 2000);
+  else if (queued && queued.status === "running" && card.status !== "running") timer = setTimeout(route, 2000);
+  else if (starting && launch.running) timer = setTimeout(route, 2000);
   else if (card.status === "running") timer = setTimeout(() => watchRun(id, progress), 3000);
 }
 
@@ -529,16 +543,162 @@ function follow(audio, transcript) {
   });
 }
 
+// ── Ручная версия и экспорт ─────────────────────────────────────────
+
+// Только DOM/textContent: даже HTML, написанный в редакторе, остаётся текстом.
+function markdownPreview(text, tc) {
+  const node = el("div", { class: "manual-note" });
+  const lines = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").split("\n");
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,6})\s+(.*)/);
+    const row = el(heading ? `h${heading[1].length}` : "p", {});
+    const value = heading ? heading[2] : line;
+    const links = /\[\[[^\]\n]+#t=([\d.]+)\|([^\]\n]+)\]\]/g;
+    let start = 0;
+    for (const match of value.matchAll(links)) {
+      row.append(document.createTextNode(value.slice(start, match.index)), tc(Number(match[1])));
+      start = match.index + match[0].length;
+    }
+    row.append(document.createTextNode(value.slice(start)));
+    node.append(row);
+  }
+  return node;
+}
+
+async function loadNoteTools(id, box, article, tc, machineAvailable) {
+  let data;
+  try { data = await api(`/api/recordings/${id}/document`); }
+  catch { return; } // Прогон только до summarize ещё не создаёт Markdown.
+  if (!box.isConnected) return;
+  const original = machineAvailable ? Array.from(article.childNodes) : [markdownPreview(data.machine, tc)];
+  const message = el("span", { class: "meta", role: "status" });
+  const label = el("span", { class: "meta" });
+  const textarea = el("textarea", { "aria-label": "Markdown конспекта", spellcheck: false });
+  const editor = el("div", { class: "note-editor", hidden: true });
+  textarea.addEventListener("input", () => { editorDirty = true; });
+  const show = () => {
+    label.textContent = data.edited ? "Ручная версия · проверка модели относится к машинной" : "Машинная версия";
+    article.replaceChildren(...(data.edited ? [markdownPreview(data.markdown, tc)] : original));
+  };
+  const button = (title, action) => el("button", { class: "secondary", type: "button", onclick: action }, title);
+  const save = button("Сохранить правки", async () => {
+    save.disabled = true;
+    try {
+      const response = await fetch(`/api/recordings/${id}/document`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ markdown: textarea.value, revision: data.revision, profile: data.profile }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail);
+      data = result;
+      editorDirty = false;
+      editor.hidden = true;
+      message.textContent = "Правки сохранены. Для записи в хранилище нажми «В Obsidian».";
+      show();
+    } catch (e) { message.textContent = `Не сохранить: ${e.message}`; }
+    finally { save.disabled = false; }
+  });
+  editor.append(textarea, el("div", { class: "row" }, save, button("Отмена", () => {
+    if (editorDirty && !confirm("Отменить несохранённые правки?")) return;
+    editorDirty = false;
+    editor.hidden = true;
+  })));
+  const profile = encodeURIComponent(data.profile);
+  const row = el("div", { class: "row" },
+    button("Править Markdown", () => { if (editor.hidden) textarea.value = data.markdown; editor.hidden = false; textarea.focus(); }),
+    button("Машинная версия", () => {
+      article.replaceChildren(...original);
+      label.textContent = "Машинная версия · ручные правки сохранены отдельно";
+    }),
+    button("Ручная версия", show),
+    el("a", { href: `/api/recordings/${id}/markdown?profile=${profile}`, download: true }, "Скачать .md"),
+    button("Копировать", async () => {
+      try {
+        await navigator.clipboard.writeText(data.markdown);
+        message.textContent = "Markdown скопирован";
+      } catch {
+        if (editorDirty) {
+          message.textContent = "Не удалось скопировать. Сначала сохрани текущие правки.";
+          return;
+        }
+        textarea.value = data.markdown;
+        editor.hidden = false;
+        textarea.focus(); textarea.select();
+        message.textContent = "Нажми Ctrl+C, чтобы скопировать выделенный Markdown";
+      }
+    }),
+    button("В Obsidian", async () => {
+      try {
+        const r = await fetch(`/api/recordings/${id}/export?profile=${profile}`, { method: "POST" });
+        const result = await r.json();
+        if (!r.ok) throw new Error(result.detail);
+        message.textContent = `Записано: ${result.path}`;
+      } catch (e) { message.textContent = `Не экспортировать: ${e.message}`; }
+    }),
+  );
+  box.replaceChildren(row, label, editor, message);
+  show();
+}
+
+// ── Дисковая очередь и уведомления ───────────────────────────────────
+
+const knownJobs = new Map();
+const JOB_STATUS = { pending: "ожидает", running: "обрабатывается", done: "готово", failed: "ошибка", cancelled: "отменено" };
+function renderQueue(box, data) {
+  const items = data.items;
+  for (const job of items) {
+    const previous = knownJobs.get(job.id);
+    if (previous && previous !== job.status && ["done", "failed"].includes(job.status)
+        && "Notification" in window && Notification.permission === "granted") {
+      try {
+        const notice = new Notification(job.status === "done" ? "Конспект готов" : "Ошибка обработки", { body: job.path.split("/").pop() });
+        notice.onclick = () => { location.hash = `#/r/${job.recording_id}`; window.focus(); };
+      } catch { /* Например, мобильный браузер требует service worker; статус остаётся в очереди. */ }
+    }
+    knownJobs.set(job.id, job.status);
+  }
+  const active = items.filter((j) => ["pending", "running"].includes(j.status)).reverse();
+  const recent = items.filter((j) => ["done", "failed"].includes(j.status)).slice(0, 3);
+  const rows = [...active, ...recent].map((job) => el("li", {},
+    el("a", { href: `#/r/${job.recording_id}` }, job.path.split("/").pop()),
+    ` · ${JOB_STATUS[job.status]}`, job.error ? ` · ${job.error}` : "",
+    job.status === "pending" ? el("button", { class: "link", onclick: async () => {
+      await fetch(`/api/queue/${job.id}/cancel`, { method: "POST" });
+      renderQueue(box, await api("/api/queue"));
+    } }, " Отменить") : null,
+  ));
+  const notifications = "Notification" in window ? el("button", {
+    class: "link", onclick: async (event) => {
+      const permission = await Notification.requestPermission();
+      event.target.textContent = permission === "granted" ? "Уведомления включены" : "Уведомления недоступны";
+    },
+  }, "Уведомлять о готовности") : null;
+  box.replaceChildren(el("h2", {}, "Очередь"), notifications,
+    data.watch_dir ? el("p", { class: "meta" }, `Watch-папка: ${data.watch_dir}`) : null,
+    data.watch_error ? el("p", { class: "error", role: "status" }, data.watch_error) : null,
+    rows.length ? el("ul", {}, rows) : el("p", { class: "muted" }, "Очередь пуста"));
+}
+
 // ── Маршрут ───────────────────────────────────────────────────────────
 
 function route() {
+  if (editorDirty) return;
   stopTimers();
   const m = location.hash.match(/^#\/r\/(\d+)/);
   if (m) showRecording(m[1]);
   else showList();
 }
 
+window.addEventListener("beforeunload", (event) => {
+  if (editorDirty) { event.preventDefault(); event.returnValue = ""; }
+});
 window.addEventListener("hashchange", () => {
+  if (editorDirty && !confirm("Есть несохранённые правки. Уйти со страницы?")) {
+    history.replaceState(null, "", currentHash || "#/");
+    return;
+  }
+  editorDirty = false;
+  currentHash = location.hash;
   window.scrollTo(0, 0);
   route();
 });

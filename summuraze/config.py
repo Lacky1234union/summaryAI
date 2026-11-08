@@ -329,6 +329,24 @@ class LLMSettings(BaseSettings):
         return v
 
 
+class WatchSettings(BaseSettings):
+    """Watch-папка включается явно; готовые файлы идут в общую очередь (#24)."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_WATCH_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    dir: Path | None = None
+    stable_seconds: float = Field(default=10, gt=0)
+    profile: str = "lecture"
+    provider: Literal["api", "local"] = "api"
+
+    @field_validator("dir", mode="before")
+    @classmethod
+    def _blank_means_none(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SUMMURAZE_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -342,6 +360,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     verify: VerifySettings = Field(default_factory=VerifySettings)
     local_llm: LocalLLMSettings = Field(default_factory=LocalLLMSettings)
+    watch: WatchSettings = Field(default_factory=WatchSettings)
 
     # Локальный STT сам по себе приватности не даёт: саммари по API увозит транскрипт целиком.
     # Полный запрет сети на уровне фабрики провайдеров — #20; здесь ловим противоречие раньше,

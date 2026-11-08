@@ -34,9 +34,10 @@ from summuraze.audio.ingest import IngestError
 from summuraze.audio.vad import NoSpeechError
 from summuraze.config import ASRSettings, LLMSettings, Settings
 from summuraze.pipeline import stages
+from summuraze.pipeline.lock import exclusive
 from summuraze.pipeline.memory import release_memory
 from summuraze.pipeline.stages import SummaryFormatError
-from summuraze.render.markdown import note_layout, publish_media, render_note
+from summuraze.render.markdown import note_layout, note_text, publish_media, rewrite_note
 from summuraze.store.artifacts import ArtifactKey, ArtifactStore
 from summuraze.store.db import Database, OutputKind
 from summuraze.summarize import verify, windows
@@ -143,6 +144,21 @@ class Pipeline:
         return prof, glossary
 
     def run(
+        self,
+        source: Path,
+        *,
+        until: StageName = "render",
+        stream: int | None = None,
+        profile: str = "lecture",
+        terms: Path | None = None,
+    ) -> RunResult:
+        self.preflight(until=until, profile=profile, terms=terms)
+        if not source.is_file():
+            raise IngestError(f"файл не найден: {source}")
+        with exclusive(self.settings.paths.data_dir / "pipeline.lock"):
+            return self._run(source, until=until, stream=stream, profile=profile, terms=terms)
+
+    def _run(
         self,
         source: Path,
         *,
@@ -368,7 +384,7 @@ class Pipeline:
                     self.settings.paths.notes_dir, source, prof.name, note_cfg.media_dir
                 )
                 media = publish_media(layout, note_audio, transcript)
-                result.note = render_note(
+                generated = note_text(
                     layout,
                     audio=audio,
                     transcript=transcript,
@@ -379,14 +395,19 @@ class Pipeline:
                     debug=note_cfg.debug,
                     report=result.verification,
                 )
-                # Срок хранения (#49) найдёт аудио и заметку по БД, а не угадыванием имён.
-                outputs: list[tuple[OutputKind, Path]] = [("note", result.note)]
-                if media is not None:
-                    outputs += [
-                        ("audio", layout.audio),
-                        ("subtitles", layout.subtitles(transcript.language)),
-                    ]
-                self.db.record_outputs(recording_id, outputs)
+                with exclusive(self.settings.paths.data_dir / "notes.lock"):
+                    self.db.save_note_version(recording_id, prof.name, "machine", generated)
+                    manual = self.db.note_version(recording_id, prof.name, "manual")
+                    rewrite_note(layout.note, str(manual["markdown"]) if manual else generated)
+                    result.note = layout.note
+                    # Срок хранения (#49) найдёт аудио и заметку по БД, а не угадыванием имён.
+                    outputs: list[tuple[OutputKind, Path]] = [("note", result.note)]
+                    if media is not None:
+                        outputs += [
+                            ("audio", layout.audio),
+                            ("subtitles", layout.subtitles(transcript.language)),
+                        ]
+                    self.db.record_outputs(recording_id, outputs)
                 seconds = time.monotonic() - started
                 cached["render"] = False
                 self.db.record_stage(run_id, "render", "-", cached=False, seconds=seconds)

@@ -135,8 +135,8 @@ def test_start_spawns_cli_run(lecture: Path, client: TestClient, spawn: FakeSpaw
 
     launch = client.get(f"/api/recordings/{rid}").json()["launch"]
     assert launch["running"] and launch["previous_run"] is None and launch["log"] == ""
-    again = _post(client, lecture)
-    assert again.status_code == 400 and "уже идёт" in again.json()["detail"], "двойной клик"
+    again = _post(client, lecture, profile="raw")
+    assert again.status_code == 202 and again.json() == r.json(), "двойной клик — та же задача"
     assert len(spawn.calls) == 1
 
 

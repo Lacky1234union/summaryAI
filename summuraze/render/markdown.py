@@ -284,7 +284,7 @@ def publish_media(layout: NoteLayout, audio: Path | None, transcript: Transcript
     return layout.audio.name
 
 
-def render_note(
+def note_text(
     layout: NoteLayout,
     *,
     audio: AudioInfo,
@@ -295,7 +295,7 @@ def render_note(
     media: str | None = None,
     debug: bool = False,
     report: Report | None = None,
-) -> Path:
+) -> str:
     body = _Body(transcript, media, debug, report)
     if isinstance(document, LectureDoc):
         title = document.title.strip() or audio.source.stem
@@ -348,7 +348,35 @@ def render_note(
     if report is not None and report.marks and not debug:
         kind = "success" if report.count("ok") == len(report.marks) else "warning"
         head += _callout(kind, "Проверено по записи", [report.describe()])
-    _write_if_changed(layout.note, "\n".join([*head, *lines]).encode("utf-8"))
+    return "\n".join([*head, *lines])
+
+
+def render_note(
+    layout: NoteLayout,
+    *,
+    audio: AudioInfo,
+    transcript: Transcript,
+    summary: LLMResult,
+    document: BaseModel,
+    profile: str,
+    media: str | None = None,
+    debug: bool = False,
+    report: Report | None = None,
+) -> Path:
+    rewrite_note(
+        layout.note,
+        note_text(
+            layout,
+            audio=audio,
+            transcript=transcript,
+            summary=summary,
+            document=document,
+            profile=profile,
+            media=media,
+            debug=debug,
+            report=report,
+        ),
+    )
     return layout.note
 
 
