@@ -30,3 +30,5 @@ make test    # быстрые тесты
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — конвейер и контракты
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — почему сделано именно так
 - [`docs/QUESTIONS.md`](docs/QUESTIONS.md) — что ещё не решено
+- [`AGENTS.md`](AGENTS.md) — инструкции для Codex и карта реализации
+- [`CLAUDE.md`](CLAUDE.md) — инструкции для Claude Code
