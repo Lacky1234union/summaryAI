@@ -22,7 +22,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from summuraze.types import TokenUsage
 
@@ -95,6 +95,40 @@ _MIGRATIONS: list[str] = [
     ALTER TABLE runs ADD COLUMN stage TEXT;
     ALTER TABLE runs ADD COLUMN stage_started_at TEXT;
     ALTER TABLE runs ADD COLUMN pid INTEGER;
+    """,
+    # #24: человеческие правки переживают перегенерацию; история версий неизменяема.
+    """
+    CREATE TABLE note_versions (
+        id INTEGER PRIMARY KEY,
+        recording_id INTEGER NOT NULL REFERENCES recordings(id),
+        profile TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('machine', 'manual')),
+        markdown TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX note_versions_latest ON note_versions(recording_id, profile, kind, id);
+
+    CREATE TABLE job_queue (
+        id INTEGER PRIMARY KEY,
+        recording_id INTEGER NOT NULL REFERENCES recordings(id),
+        path TEXT NOT NULL,
+        profile TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending','running','done','failed','cancelled')),
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        pid INTEGER,
+        previous_run INTEGER,
+        error TEXT
+    );
+    CREATE UNIQUE INDEX job_queue_active ON job_queue(path, profile, provider)
+        WHERE status IN ('pending', 'running');
+    CREATE TABLE watch_seen (
+        path TEXT PRIMARY KEY,
+        size INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL
+    );
     """,
 ]
 
@@ -248,6 +282,40 @@ class Database:
             (recording_id,),
         ).fetchall()
         return [(row["kind"], Path(row["path"])) for row in rows]
+
+    def note_version(self, recording_id: int, profile: str, kind: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT id, markdown, created_at FROM note_versions"
+            " WHERE recording_id = ? AND profile = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+            (recording_id, profile, kind),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def save_note_version(
+        self,
+        recording_id: int,
+        profile: str,
+        kind: str,
+        markdown: str,
+        *,
+        expected: int | None = None,
+    ) -> int:
+        # Блокировка до чтения версии: две вкладки не могут молча затереть правки друг друга.
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            previous = self.note_version(recording_id, profile, kind)
+            revision = int(previous["id"]) if previous else 0
+            if expected is not None and expected != revision:
+                raise ValueError("документ изменён в другой вкладке — обнови его перед сохранением")
+            if previous is not None and previous["markdown"] == markdown:
+                return revision
+            cur = self._conn.execute(
+                "INSERT INTO note_versions(recording_id, profile, kind, markdown, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (recording_id, profile, kind, markdown, _now()),
+            )
+            assert cur.lastrowid is not None
+            return cur.lastrowid
 
     def unpruned_recordings(self) -> list[RecordingRow]:
         rows = self._conn.execute(

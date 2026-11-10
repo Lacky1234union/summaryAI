@@ -15,18 +15,24 @@ PUT, а не формой: multipart потребовал бы ещё завис
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from summuraze.config import Settings
+from summuraze.pipeline.lock import exclusive
+from summuraze.store import notes
 from summuraze.store.artifacts import ArtifactStore
 from summuraze.store.db import Database
 from summuraze.web import runs, view
+from summuraze.web.queue import Worker
 
 STATIC = Path(__file__).parent / "static"
 _AUDIO_TYPES = {".ogg": "audio/ogg", ".wav": "audio/wav", ".mka": "audio/x-matroska"}
@@ -39,14 +45,108 @@ class RunRequest(BaseModel):
     consent: bool = False
 
 
+class EditRequest(BaseModel):
+    markdown: str = Field(max_length=2_000_000)
+    revision: int = Field(ge=0)
+    profile: str = "lecture"
+
+
 def create_app(settings: Settings, *, spawn: runs.Spawn | None = None) -> FastAPI:
-    app = FastAPI(title="summuraze", docs_url=None, redoc_url=None, openapi_url=None)
     store = ArtifactStore(settings.paths.artifacts_dir)
     log_dir = settings.paths.data_dir / "web-runs"
     launcher = runs.Launcher(log_dir) if spawn is None else runs.Launcher(log_dir, spawn)
+    worker = Worker(settings, launcher)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        worker.start()
+        try:
+            yield
+        finally:
+            worker.close()
+
+    app = FastAPI(
+        title="summuraze", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+    )
 
     def db() -> Database:
         return Database(settings.paths.db_path)
+
+    def profile_for(conn: Database, recording_id: int, profile: str | None) -> str:
+        from summuraze.summarize.profiles import get_profile
+
+        row = conn.latest_run(recording_id)
+        if row is None:
+            raise HTTPException(404, "нет такой записи")
+        chosen = profile or row.profile or "lecture"
+        try:
+            get_profile(chosen)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        return chosen
+
+    def read_document(recording_id: int, profile: str | None) -> dict[str, Any]:
+        with db() as conn:
+            chosen = profile_for(conn, recording_id, profile)
+            try:
+                with exclusive(settings.paths.data_dir / "notes.lock"):
+                    return notes.document(conn, settings, recording_id, chosen)
+            except FileNotFoundError as e:
+                raise HTTPException(404, str(e)) from None
+
+    @app.get("/api/recordings/{recording_id}/document")
+    def document(recording_id: int, profile: str | None = None) -> dict[str, Any]:
+        return read_document(recording_id, profile)
+
+    @app.put("/api/recordings/{recording_id}/document")
+    def edit(recording_id: int, request: EditRequest) -> dict[str, Any]:
+        with db() as conn:
+            chosen = profile_for(conn, recording_id, request.profile)
+            try:
+                return notes.save(
+                    conn, settings, recording_id, chosen, request.markdown, request.revision
+                )
+            except FileNotFoundError as e:
+                raise HTTPException(404, str(e)) from None
+            except ValueError as e:
+                raise HTTPException(409, str(e)) from None
+
+    @app.get("/api/recordings/{recording_id}/markdown")
+    def markdown(
+        recording_id: int, profile: str | None = None, machine: bool = False
+    ) -> PlainTextResponse:
+        data = read_document(recording_id, profile)
+        text = data["machine"] if machine else data["markdown"]
+        filename = quote(f"конспект-{recording_id}.md")
+        return PlainTextResponse(
+            text,
+            media_type="text/markdown",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+        )
+
+    @app.post("/api/recordings/{recording_id}/export")
+    def export(recording_id: int, profile: str | None = None) -> dict[str, str]:
+        with db() as conn:
+            chosen = profile_for(conn, recording_id, profile)
+            try:
+                path = notes.export_to_vault(conn, settings, recording_id, chosen)
+            except FileNotFoundError as e:
+                raise HTTPException(404, str(e)) from None
+        return {"path": str(path)}
+
+    @app.get("/api/queue")
+    def queue() -> dict[str, Any]:
+        return {
+            "items": worker.queue.jobs(),
+            "watch_error": worker.watch_error,
+            "watch_dir": str(settings.watch.dir) if settings.watch.dir else None,
+        }
+
+    @app.post("/api/queue/{job_id}/cancel")
+    def cancel_queued(job_id: int) -> dict[str, bool]:
+        if not worker.queue.cancel(job_id):
+            raise HTTPException(409, "отменить можно только ожидающую задачу")
+        return {"ok": True}
 
     @app.get("/api/recordings")
     def recordings() -> dict[str, Any]:
@@ -62,7 +162,20 @@ def create_app(settings: Settings, *, spawn: runs.Spawn | None = None) -> FastAP
             found = view.detail(conn, store, settings, recording_id)
         if found is None:
             raise HTTPException(404, "нет такой записи")
-        return {"now": view.utc_now(), "launch": launcher.state(recording_id), **found.model_dump()}
+        queued = next(
+            (
+                job
+                for job in worker.queue.jobs()
+                if job["recording_id"] == recording_id and job["status"] in ("pending", "running")
+            ),
+            None,
+        )
+        return {
+            "now": view.utc_now(),
+            "launch": launcher.state(recording_id),
+            "queue_job": queued,
+            **found.model_dump(),
+        }
 
     @app.get("/api/recordings/{recording_id}/audio")
     def audio(recording_id: int) -> FileResponse:
@@ -107,22 +220,22 @@ def create_app(settings: Settings, *, spawn: runs.Spawn | None = None) -> FastAP
 
     @app.post("/api/runs")
     def start(request: RunRequest) -> JSONResponse:
-        with db() as conn:
-            try:
-                recording_id = launcher.start(
-                    settings,
-                    conn,
-                    Path(request.path),
-                    profile=request.profile,
-                    provider=request.provider,
-                    consent=request.consent,
-                )
-            except runs.LaunchError as e:
-                status = 409 if e.consent else 400
-                return JSONResponse({"detail": str(e), "consent": e.consent}, status_code=status)
-            except ValueError as e:  # неизвестный профиль
-                raise HTTPException(400, str(e)) from None
-        return JSONResponse({"recording_id": recording_id}, status_code=202)
+        try:
+            job = worker.queue.submit(
+                Path(request.path),
+                profile=request.profile,
+                provider=request.provider,
+                consent=request.consent,
+            )
+        except runs.LaunchError as e:
+            status = 409 if e.consent else 400
+            return JSONResponse({"detail": str(e), "consent": e.consent}, status_code=status)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        worker.tick()
+        return JSONResponse(
+            {"recording_id": job["recording_id"], "job_id": job["id"]}, status_code=202
+        )
 
     @app.post("/api/recordings/{recording_id}/cancel")
     def stop(recording_id: int) -> dict[str, bool]:

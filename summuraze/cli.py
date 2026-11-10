@@ -19,7 +19,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
@@ -511,6 +511,64 @@ def _open_url(url: str) -> None:
     import webbrowser
 
     webbrowser.open(url)
+
+
+@app.command()
+def watch(
+    folder: Annotated[Path | None, typer.Argument(help="Папка новых записей")] = None,
+) -> None:
+    """Новые готовые файлы → очередь → конспекты. Настройки SUMMURAZE_WATCH_*.
+
+    Папка также наблюдается, пока запущен `summuraze web`.
+    """
+    import time
+
+    from summuraze.config import get_settings
+    from summuraze.pipeline.orchestrator import Pipeline
+    from summuraze.web.queue import Worker, notify
+    from summuraze.web.runs import Launcher, settings_for
+
+    with _clean_errors():
+        settings = get_settings()
+        if folder is not None:
+            settings = settings.model_copy(
+                update={"watch": settings.watch.model_copy(update={"dir": folder})}
+            )
+        if settings.watch.dir is None or not settings.watch.dir.expanduser().is_dir():
+            raise ValueError(
+                "укажи существующую папку: summuraze watch ПАПКА или SUMMURAZE_WATCH_DIR"
+            )
+        chosen = settings_for(settings, settings.watch.provider)
+        with Pipeline(chosen) as pipeline:
+            pipeline.preflight(profile=settings.watch.profile)
+            _confirm_remote(pipeline)
+
+        def completed(job: dict[str, Any]) -> None:
+            label = "Готово" if job["status"] == "done" else "Ошибка"
+            typer.echo(
+                f"{label}: {Path(job['path']).name}"
+                + (f" — {job['error']}" if job["error"] else "")
+            )
+            notify(job)
+
+        worker = Worker(
+            settings, Launcher(settings.paths.data_dir / "web-runs"), on_complete=completed
+        )
+        typer.echo(f"Watch: {settings.watch.dir.expanduser()} — Ctrl+C для остановки наблюдения")
+        worker.start()
+        previous_error = None
+        try:
+            while True:
+                time.sleep(0.5)
+                if worker.watch_error and worker.watch_error != previous_error:
+                    typer.echo(f"Watch: {worker.watch_error}", err=True)
+                previous_error = worker.watch_error
+        except KeyboardInterrupt:
+            typer.echo(
+                "\nНаблюдение остановлено. Очередь сохранена; начатый прогон продолжает работу."
+            )
+        finally:
+            worker.close()
 
 
 @app.command()

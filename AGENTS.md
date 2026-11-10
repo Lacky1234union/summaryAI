@@ -173,6 +173,9 @@ curl-шпаргалка по API (создание issue, комментарии
   `budget.py`, `windows.py`, `profiles.py`, `verify.py` — бюджет, окна, схемы и проверка.
 - `store/artifacts.py` — хешированные каталоги, атомарная публикация с манифестом и GC;
   `store/db.py` — SQLite и миграции; `store/retention.py` — удаление аудио с сохранением текста.
+- `store/notes.py` — ручной Markdown отдельно от машинного, история в `note_versions`;
+  `web/queue.py` — FIFO и watch, `pipeline/lock.py` — общий Linux flock для CLI и worker.
+  Не обходи проверку версии при сохранении и не заменяй ручной документ машинным при рендере.
 - `render/markdown.py` — итоговый и отладочный Obsidian Markdown, ссылки и вложения;
   `subtitles.py` / `export.py` — общие реплики и экспорт транскрипта.
 - `cli.py` / `menu.py` — интерфейсы к одному конвейеру; `audio/record.py` / `pairs.py` —

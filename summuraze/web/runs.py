@@ -8,8 +8,8 @@
 (ключ, папка заметок, модель `--local`) и согласие на отправку транскрипта наружу (#20). У
 процесса нет терминала — без согласия в БД он откажет, но узнать об этом через час Whisper поздно.
 
-Тяжёлый прогон — один за раз: ASR и локальная LLM двух прогонов в 14 ГБ не влезут. Очередь — #24;
-пока второй запуск получает отказ.
+Тяжёлый прогон — один за раз: ASR и локальная LLM двух прогонов в 14 ГБ не влезут.
+FIFO и watch живут в `queue.py` (#24); Launcher повторно проверяет занятость перед стартом.
 """
 
 from __future__ import annotations
@@ -90,7 +90,10 @@ def allowed(path: Path, settings: Settings, db: Database) -> bool:
     файл. Произвольный путь с другого устройства в сети — нет."""
     if not path.is_file():
         return False
-    inside = path.resolve().parent == settings.record.directory.resolve()
+    folders = [settings.record.directory]
+    if settings.watch.dir is not None:
+        folders.append(settings.watch.dir.expanduser())
+    inside = path.resolve().parent in [p.resolve() for p in folders]
     return inside or db.recording_by_path(path) is not None
 
 
@@ -242,7 +245,7 @@ class Launcher:
             recording_id, _ = db.register_source(path)
             latest = db.latest_run(recording_id)
             self.log_dir.mkdir(parents=True, exist_ok=True)
-            log = self.log_dir / f"{datetime.now():%Y%m%d-%H%M%S}-{recording_id}.log"
+            log = self.log_dir / f"{datetime.now():%Y%m%d-%H%M%S-%f}-{recording_id}.log"
             argv = [sys.executable, "-m", "summuraze.cli", "run", str(path), "--profile", profile]
             if provider == "local":
                 argv.append("--local")
