@@ -38,6 +38,10 @@ dev = [
     # Покрытие (#35): порог в [tool.coverage.report], гоняется `make cov` и в CI.
     "pytest-cov>=6.0",
 ]
+diarization-bench = [
+    "pyannote-metrics>=4,<5",
+    "sherpa-onnx==2.0.1",
+]
 
 # Сейчас torch в зависимостях нет (ADR 2026-10-27); индекс оставлен для этапа 5, когда его
 # приведёт pyannote.audio.

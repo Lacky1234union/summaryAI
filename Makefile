@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install lint fmt test cov ci test-all bench-asr run clean
+.PHONY: help install lint fmt test cov ci test-all bench-asr bench-diar run clean
 
 help:                 ## Показать эти команды
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -39,6 +39,9 @@ run:                  ## Прогнать конвейер: make run FILE=зап
 
 bench-asr:            ## Бенчмарк STT-моделей на этом железе (#9) → docs/BENCHMARKS.md
 	uv run summuraze bench asr
+
+bench-diar:           ## CPU/DER-замер diarization (#25), параметры: ARGS='--audio …' (docs/dev/DIARIZATION.md)
+	uv run --group diarization-bench python tests/eval/diarization.py $(ARGS)
 
 clean:                ## Убрать кэши инструментов и артефакты сборки
 	rm -rf .mypy_cache .ruff_cache .pytest_cache build dist *.egg-info
