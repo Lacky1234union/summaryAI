@@ -1,0 +1,53 @@
+"""Заглушка LLM: никуда не ходит, возвращает сводку о том, что ей передали.
+
+Нужна этапу 0 и тестам — сквозной прогон без сети и без ключа. Токены оцениваются грубо
+(4 символа на токен): цифры видны в `summuraze log`, но ни на что не влияют.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from summuraze.summarize.schema import empty_document
+from summuraze.types import LLMResult, TokenUsage
+
+
+class EchoLLM:
+    name = "echo"
+    model = "echo"
+
+    def __init__(self, context: int = 1_000_000) -> None:
+        self.context_window = context
+
+    def count_tokens(self, text: str) -> int | None:
+        return None
+
+    def close(self) -> None:
+        pass
+
+    def complete(
+        self,
+        *,
+        system: str,
+        prefix: str,
+        question: str,
+        max_tokens: int,
+        schema: dict[str, Any] | None = None,
+    ) -> LLMResult:
+        lines = [ln for ln in prefix.splitlines() if ln.strip()]
+        text = (
+            f"Эхо-саммари: транскрипт из {len(lines)} строк, {len(prefix)} символов.\n"
+            f"Первая строка: {lines[0] if lines else '—'}"
+        )
+        if schema is not None:
+            # Пустой, но валидный документ: конвейер и рендер проходят без модели.
+            text = json.dumps(empty_document(schema), ensure_ascii=False)
+        return LLMResult(
+            text=text,
+            model=self.model,
+            usage=TokenUsage(
+                input=(len(system) + len(prefix) + len(question)) // 4, output=len(text) // 4
+            ),
+            cost_usd=0.0,
+        )

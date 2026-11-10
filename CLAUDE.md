@@ -1,5 +1,7 @@
 # CLAUDE.md — Руководство для Claude Code
 
+Аналог для Codex — [`AGENTS.md`](AGENTS.md). Общие правила поддерживаем согласованными.
+
 ## Что мы строим
 
 **Summuraze** — локальный писатель саммари к созвонам, лекциям, встречам и семинарам.
@@ -16,11 +18,58 @@
 
 ## ⚡ Первое действие в каждой сессии
 
+Из корня проекта (после `uv sync`). `.env` читаем как dotenv, а не shell-код.
+В окружение экспортируем **только** Gitea-переменные: сначала окружение процесса, затем
+`.env` проекта, недостающие URL и токен — из `../vobot/.env`. Соседний файл целиком не
+подключаем: его `GITEA_REPO` относится к другому проекту.
+
 ```bash
-set -a; . ./.env 2>/dev/null; set +a
+load_summuraze_gitea() {
+  local exports
+  exports="$(uv run --no-sync python - <<'PYTHON'
+import os
+import shlex
+from dotenv import dotenv_values
+
+project = dotenv_values(".env", interpolate=False)
+shared = dotenv_values("../vobot/.env", interpolate=False)
+values = {}
+for key in ("GITEA_URL", "GITEA_TOKEN"):
+    value = os.environ.get(key) or project.get(key) or shared.get(key)
+    if not value:
+        raise SystemExit(f"Нет {key}: задай в окружении или .env проекта")
+    values[key] = value
+values["GITEA_REPO"] = "HSE/SummaryAI"
+for key, value in values.items():
+    print(f"export {key}={shlex.quote(value)}")
+PYTHON
+  )" || return
+  eval "$exports"
+}
+load_summuraze_gitea
 ```
 
-`GITEA_TOKEN` — секрет, **в чат не печатать**. Токен и `GITEA_URL` те же, что в vobot.
+`GITEA_TOKEN` — секрет: не печатать в чат, логи или git; не включать `set -x`.
+Команда захватывает вывод Python внутри оболочки, а не выводит токен в терминал.
+`GITEA_REPO` всегда задаётся явно: **HSE/SummaryAI**, независимо от окружения и соседнего `.env`.
+Проверка доступа без вывода секрета:
+
+```bash
+uv run --no-sync python - <<'PYTHON'
+import json
+import os
+import urllib.request
+
+url = f"{os.environ['GITEA_URL'].rstrip('/')}/api/v1/repos/{os.environ['GITEA_REPO']}"
+request = urllib.request.Request(
+    url, headers={"Authorization": "token " + os.environ["GITEA_TOKEN"]}
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    repo = json.load(response)
+assert repo["full_name"] == "HSE/SummaryAI", "Ответ от другого репозитория"
+print("Gitea: доступ к HSE/SummaryAI проверен")
+PYTHON
+```
 
 **Задачи — в Gitea Issues, не в файлах:** https://gitea.24studbank.ru/HSE/SummaryAI/issues
 Этапы плана = вехи (milestones), одна задача = один issue. Нет issue — нет кода.
@@ -33,6 +82,17 @@ curl-шпаргалка по API (создание issue, комментарии
 Лог выполнения дописывается в тело issue секцией `### YYYY-MM-DD`; архитектурные решения —
 в `docs/DECISIONS.md`.
 
+### Ветки
+
+| Ветка | Что в ней |
+|---|---|
+| `main` | **только работающее.** Сюда мержим, когда этап принят и проверен на живой записи |
+| `dev` | рабочая ветка: вся разработка идёт здесь, PR из задач — сюда |
+| `feat/<issue#>-<slug>` | одна задача = одна ветка от `dev` |
+
+Порядок: ветка от `dev` → работа → push → PR в `dev`. Промоушн `dev` → `main` — только осознанно,
+когда этап принят; никогда не автоматом за завершением задачи.
+
 ---
 
 ## Карта документации
@@ -44,6 +104,7 @@ curl-шпаргалка по API (создание issue, комментарии
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | ADR: что решили и почему (дописываем сверху) |
 | [`docs/QUESTIONS.md`](docs/QUESTIONS.md) | Открытые вопросы по этапам + бэклог идей |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Замеры моделей на **этом** железе: RTF, WER, RSS |
+| [`docs/dev/CI_RUNNER.md`](docs/dev/CI_RUNNER.md) | CI: раннер act_runner, защита веток, разбор падений |
 
 ---
 
@@ -76,7 +137,7 @@ curl-шпаргалка по API (создание issue, комментарии
 7. Модель (STT или LLM) выбирается **замером на этом железе**; результат — в `BENCHMARKS.md`
    с датой и версиями. Чужие бенчмарки на 4090 здесь не значат ничего.
 8. ID моделей провайдера сверять в момент реализации: `deepseek-chat` retired 24.07.2026.
-9. `make lint` + `make test` — зелёные перед коммитом.
+9. `make lint` + `make test` — зелёные перед коммитом; `make ci` = то, что гоняет CI (с покрытием ≥ 85 %).
 
 ---
 

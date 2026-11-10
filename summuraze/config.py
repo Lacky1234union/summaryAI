@@ -1,0 +1,442 @@
+"""Типизированный конфиг: единая точка валидации окружения.
+
+Смысл — уронить процесс на старте с понятным сообщением, а не выстрелить `None` на сороковой
+минуте транскрибации. Поэтому `os.getenv` по коду вразброс не заводим (guardrail #3): всё, что
+приходит из окружения, объявлено здесь и проверено при создании `Settings`.
+
+Секции соответствуют переменным из `.env.example` один к одному: у каждой свой префикс, так что
+`SUMMURAZE_ASR_MODEL` попадает в `settings.asr.model` без ручного маппинга.
+
+`.env` читается самим pydantic-settings через `env_file`, а не вызовом `load_dotenv()` на импорте
+модуля. Так исчезает ловушка порядка: при `load_dotenv()` важно, чтобы он успел до создания
+настроек, иначе часть переменных окажется пустой — и ошибка проявится не там, где сделана.
+`env_file` снимает вопрос совсем, а не описывает его в комментарии.
+
+Refs #3
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urlparse
+
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from summuraze.audio.pairs import parse_hhmm
+
+# Хосты, которые считаем локальными при проверке --local-only. Сравнение — с разобранным именем
+# хоста, а не подстрокой URL: `https://evil.com/?localhost` локальным не станет.
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1", "host.docker.internal"})
+
+
+def is_local_url(url: str) -> bool:
+    return (urlparse(url).hostname or "") in _LOCAL_HOSTS
+
+
+def llm_destination(provider: str) -> str:
+    """Куда уехал транскрипт (#20): хост провайдера или «локально». `provider` — как в
+    `runs.llm_provider`: base_url или `echo`."""
+    if provider == "echo" or is_local_url(provider):
+        return "локально"
+    return urlparse(provider).hostname or provider
+
+
+class PathsSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    data_dir: Path = Path("./data")
+    # Куда кладутся готовые заметки — папка внутри Obsidian-хранилища (ADR 2026-10-26).
+    # Пусто = `<data_dir>/notes`, чтобы прогон работал и без Obsidian.
+    output_dir: Path | None = None
+
+    @field_validator("output_dir", mode="before")
+    @classmethod
+    def _blank_output_means_default(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @property
+    def notes_dir(self) -> Path:
+        return (self.output_dir or self.data_dir / "notes").expanduser()
+
+    @property
+    def artifacts_dir(self) -> Path:
+        """Артефакты стадий. Ключ — хеш входа и версии стадии, поэтому правка промпта
+        не перезапускает ASR (ADR «Кэш артефактов по стадиям»)."""
+        return self.data_dir / "artifacts"
+
+    @property
+    def db_path(self) -> Path:
+        """SQLite: состояние задач, история прогонов, стоимость."""
+        return self.data_dir / "summuraze.sqlite"
+
+
+class NoteSettings(BaseSettings):
+    """Заметка Obsidian (#18): аудио и субтитры рядом с ней, для ссылок-таймкодов."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_NOTE_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # Сжатое аудио в хранилище (ADR 2026-10-26, вариант «б»): таймкоды Media Extended ведут в
+    # него, и оно же играет на телефоне. false — таймкоды остаются текстом.
+    audio: bool = True
+    # Opus для речи: 32 кбит/с ≈ 14 МБ на час — LiveSync переносит без проблем.
+    audio_bitrate_kbps: int = Field(default=32, ge=8, le=256)
+    # Подпапка заметок для аудио и .srt — чтобы в списке заметок не было вложений.
+    media_dir: str = "Записи"
+    # Отладочный вид заметки (#50): модели, стоимость, исходник, всё развёрнуто. По умолчанию —
+    # итоговый, для чтения.
+    debug: bool = False
+
+
+class RecordSettings(BaseSettings):
+    """`summuraze record` (#37): что и куда писать."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_RECORD_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # Оригиналы записей. Срок хранения и чистка — #49.
+    dir: Path = Path("~/Recordings")
+    # Источники PipeWire/PulseAudio (`pactl list short sources`). Пусто — системные по умолчанию:
+    # микрофон и монитор вывода. system=none — только микрофон.
+    mic: str | None = None
+    system: str | None = None
+    # Opus на дорожку: 32 кбит/с ≈ 14 МБ на час, а дорожек две.
+    bitrate_kbps: int = Field(default=32, ge=8, le=256)
+    # Авто-стоп, если все дорожки молчат дольше стольких минут (забыл остановить после пары).
+    # 0 — не останавливать.
+    silence_stop_minutes: float = Field(default=15, ge=0)
+    # `record --pair` (#67): начала пар, длительность занятия и запас после конца пары.
+    # По умолчанию — сетка НИУ ВШЭ; JSON-списком: ["09:30","11:10",…].
+    pairs: list[str] = ["09:30", "11:10", "13:00", "14:40", "16:20", "18:10", "19:40"]
+    pair_minutes: float = Field(default=80, gt=0, le=300)
+    pair_margin_minutes: float = Field(default=10, ge=0, le=60)
+
+    @field_validator("pairs")
+    @classmethod
+    def _pairs_are_times(cls, v: list[str]) -> list[str]:
+        for item in v:
+            parse_hhmm(item)
+        return v
+
+    @field_validator("mic", "system", mode="before")
+    @classmethod
+    def _blank_means_default(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @property
+    def directory(self) -> Path:
+        return self.dir.expanduser()
+
+
+class ASRSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_ASR_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # echo — заглушка без распознавания: для тестов и проверки конвейера без модели.
+    provider: Literal["echo", "faster-whisper"] = "faster-whisper"
+    # Дефолт — предположение до замера. Настоящий выбор делает бенчмарк на этом железе (#9)
+    # по правилу «лучшее качество при RTF <= 0.5».
+    model: str = "large-v3-turbo"
+    compute_type: str = "int8"
+    device: Literal["cpu", "cuda", "auto"] = "cpu"
+    # Пусто = автоопределение языка.
+    language: str | None = "ru"
+    # 0 = по числу физических ядер: на 5700U 8 потоков дают RTF 0.43, дефолт CTranslate2 (4) —
+    # 0.63. Гиперпотоки не помогают; точное число уточнит замер (#9).
+    threads: int = Field(default=0, ge=0)
+    # Общий словарь терминов (#13) — можно заметкой в Obsidian. Словарь курса передаётся
+    # `--terms` и идёт первым: в подсказку Whisper влезает только ~10 терминов.
+    terms_file: Path | None = None
+    # Запрет сети (#20): модель берётся только с диска, скачивание с HuggingFace запрещено.
+    # Ставится из `Settings.local_only`, а не своей переменной.
+    local_only: bool = False
+
+    @field_validator("terms_file", mode="before")
+    @classmethod
+    def _blank_terms_means_none(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _blank_language_means_auto(cls, v: object) -> object:
+        """`SUMMURAZE_ASR_LANGUAGE=` в .env — это «определяй сам», а не язык с пустым именем."""
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+
+class VADSettings(BaseSettings):
+    """Разметка речи перед ASR (#10). Пороги — Silero; дефолты подобраны под лекцию:
+    паузу на вдох внутри фразы не режем, щелчки короче 250 мс речью не считаем."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_VAD_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # false — ASR получает запись целиком. Для диагностики «VAD съел речь», не для работы.
+    enabled: bool = True
+    # Вероятность речи, выше которой окно 32 мс считается речью.
+    threshold: float = Field(default=0.5, gt=0, lt=1)
+    # Пауза короче этой не разрывает интервал.
+    min_silence_ms: int = Field(default=1000, ge=0)
+    # Интервал короче этого выбрасывается (щелчки, кашель).
+    min_speech_ms: int = Field(default=250, ge=0)
+    # Запас с каждой стороны интервала, чтобы не откусить первый и последний слог.
+    speech_pad_ms: int = Field(default=400, ge=0)
+
+
+class VerifySettings(BaseSettings):
+    """Проверка утверждений саммари по транскрипту (#22)."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_VERIFY_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # Ещё один запрос к той же модели: по API — копейки (транскрипт из кэша префикса), своей
+    # модели — пара минут на вердикты. false — заметка без пометок о проверке.
+    enabled: bool = True
+
+
+class LocalLLMSettings(BaseSettings):
+    """Локальная модель для `--local` (#19): summuraze сам поднимает `llama-server` после ASR
+    и гасит его после саммари.
+
+    Сервер — отдельный процесс на время стадии, а не постоянный демон: Whisper и 8B-модель вместе
+    в 14 ГБ не влезают (CLAUDE.md, «Память»), а запущенный заранее сервер держал бы 5–7 ГБ всё
+    время транскрибации.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_LOCAL_LLM_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Файл gguf; выбор модели — замером на этом железе (BENCHMARKS.md, «Саммаризация»).
+    model: Path | None = None
+    # Бинарь llama.cpp: имя в PATH или полный путь.
+    server: str = "llama-server"
+    # Контекст сервера. От него же — порог single-pass и окна (#16, #21). Каждые 1k токенов
+    # контекста — ~70 МБ KV-кэша у 8B в q8_0: 16k — около гигабайта сверх весов.
+    context: int = Field(default=16_384, ge=4096)
+    # Потоки генерации; пусто — по числу физических ядер (у llama.cpp по умолчанию — все логические,
+    # на SMT это медленнее).
+    threads: int | None = Field(default=None, gt=0)
+    # Сколько ждать загрузки модели с диска.
+    start_timeout: float = Field(default=300.0, gt=0)
+    # Дополнительные флаги llama-server как есть, JSON-списком: ["--reasoning-budget", "0"].
+    args: list[str] = []
+    # Сколько последних KV-кэшей транскриптов держать на диске (у 4B — ~1.5 ГБ на час
+    # записи). 0 — не сохранять: повторный прогон с другим профилем пересчитает префикс заново.
+    slot_cache: int = Field(default=2, ge=0)
+    # Куда их класть; задаёт `Settings.localized()` — рядом с кэшем артефактов.
+    slot_dir: Path | None = None
+
+    @field_validator("model", "threads", "slot_dir", mode="before")
+    @classmethod
+    def _blank_means_none(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+
+class LLMSettings(BaseSettings):
+    """Провайдер саммаризации.
+
+    Переключение локально <-> API живёт ЗДЕСЬ, а не в коде конвейера: DeepSeek, OpenRouter,
+    Yandex и локальный llama.cpp говорят по одному OpenAI-совместимому протоколу, поэтому
+    разница между режимами — значения `base_url` и `model` (guardrail #2).
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_LLM_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,  # LLMSettings(api_key=...) в коде и тестах — мимо алиасов окружения
+    )
+
+    # openai-compat — единый адаптер для DeepSeek и llama.cpp (#15); echo — заглушка без сети,
+    # для тестов и проверки конвейера. Это не третий путь «локально/API».
+    provider: Literal["echo", "openai-compat"] = "openai-compat"
+    # Дефолт — OpenRouter, как в остальных проектах (meditron, vobot, tgit): один ключ на всё.
+    # DeepSeek V4.1-Flash там же, что и на api.deepseek.com (сверено 2026-10-27).
+    base_url: str = "https://openrouter.ai/api/v1"
+    # Алиас deepseek-chat retired 24.07.2026 — не использовать.
+    model: str = "deepseek/deepseek-v4.1-flash"
+    # OPENROUTER_API_KEY — то же имя, что в meditron / vobot / tgit: ключ не дублируется по .env.
+    api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("SUMMURAZE_LLM_API_KEY", "OPENROUTER_API_KEY"),
+    )
+    # OpenRouter режет IP из РФ на edge — с такого хоста нужен HTTP(S)/SOCKS5-прокси
+    # (http://user:pass@host:port, socks5://…). Пусто — напрямую. Имена — как в tgit и vobot.
+    proxy_url: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "SUMMURAZE_LLM_PROXY_URL", "LLM_PROXY_URL", "OPENROUTER_PROXY_URL"
+        ),
+    )
+    # OpenRouter отдаёт модель ~40 провайдерам, часть из них — в fp4: на живой записи такой
+    # провайдер скопировал транскрипт во все разделы конспекта (2026-10-28). Пускаем только эти
+    # точности; unknown — провайдеры, не объявившие точность. Пусто — без фильтра.
+    openrouter_quantizations: list[str] = ["fp8", "bf16", "fp16", "fp32", "unknown"]
+    # Рассуждение модели (`reasoning.enabled`). С ним DeepSeek V4.1-Flash пишет конспект в
+    # рассуждение, а в ответ по схеме у части провайдеров — пустой шаблон: 5 из 6 на созвоне
+    # 2026-10-29; без него — 1 из 4, и дешевле (#63, BENCHMARKS). Пусто — как решит модель.
+    openrouter_reasoning: bool | None = False
+    # Контекст провайдера: от него считается порог single-pass против иерархии (#16).
+    # У DeepSeek V4.1-Flash — 1M, у локальной 8B-модели на два порядка меньше.
+    context: int = Field(default=1_000_000, gt=0)
+    # Порог single-pass в токенах запроса, если он ниже, чем позволяет контекст: на длинном
+    # контексте модель начинает терять середину раньше, чем кончается окно. Пусто — по контексту.
+    single_pass_max: int | None = Field(default=None, gt=0)
+    # Запрет сети (#20): фабрика не создаст провайдера с внешним адресом. Ставится из
+    # `Settings.local_only`, а не своей переменной.
+    local_only: bool = False
+    # Поднять llama-server самому (#19): задаётся `Settings.localized()`, а не переменной.
+    server: LocalLLMSettings | None = Field(default=None, exclude=True)
+
+    @property
+    def host(self) -> str:
+        return urlparse(self.base_url).hostname or ""
+
+    @property
+    def is_local(self) -> bool:
+        # echo никуда не ходит — base_url для него не значит ничего.
+        return self.provider == "echo" or is_local_url(self.base_url)
+
+    @field_validator("proxy_url", mode="before")
+    @classmethod
+    def _blank_proxy_means_direct(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+
+class WatchSettings(BaseSettings):
+    """Watch-папка включается явно; готовые файлы идут в общую очередь (#24)."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_WATCH_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    dir: Path | None = None
+    stable_seconds: float = Field(default=10, gt=0)
+    profile: str = "lecture"
+    provider: Literal["api", "local"] = "api"
+
+    @field_validator("dir", mode="before")
+    @classmethod
+    def _blank_means_none(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="SUMMURAZE_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    paths: PathsSettings = Field(default_factory=PathsSettings)
+    vad: VADSettings = Field(default_factory=VADSettings)
+    note: NoteSettings = Field(default_factory=NoteSettings)
+    record: RecordSettings = Field(default_factory=RecordSettings)
+    asr: ASRSettings = Field(default_factory=ASRSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
+    verify: VerifySettings = Field(default_factory=VerifySettings)
+    local_llm: LocalLLMSettings = Field(default_factory=LocalLLMSettings)
+    watch: WatchSettings = Field(default_factory=WatchSettings)
+
+    # Локальный STT сам по себе приватности не даёт: саммари по API увозит транскрипт целиком.
+    # Полный запрет сети на уровне фабрики провайдеров — #20; здесь ловим противоречие раньше,
+    # чтобы оно не всплыло после часа транскрибации.
+    local_only: bool = False
+    # Срок хранения аудио своих записей в днях (#49): по истечении оригинал, кэш wav и аудио
+    # в хранилище удаляются в конце прогона; заметки и транскрипты остаются. Пусто — не удалять.
+    retention_days: float | None = Field(default=None, gt=0)
+
+    @field_validator("retention_days", mode="before")
+    @classmethod
+    def _blank_retention_means_forever(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @model_validator(mode="after")
+    def _local_only_forbids_remote_llm(self) -> Settings:
+        return self._enforce_local_only()
+
+    def _enforce_local_only(self) -> Settings:
+        if self.local_only:
+            # Запрет доезжает до секций: фабрики видят только свою секцию и режут сеть сами.
+            self.llm = self.llm.model_copy(update={"local_only": True})
+            self.asr = self.asr.model_copy(update={"local_only": True})
+            if not self.llm.is_local:
+                raise ValueError(local_only_conflict(self.llm))
+        return self
+
+    def restricted(self) -> Settings:
+        """Тот же конфиг под `--local-only`: с той же проверкой, что и из .env."""
+        return self.model_copy(update={"local_only": True})._enforce_local_only()
+
+    def localized(self) -> Settings:
+        """`--local` (#19): саммари делает своя модель через llama-server, сеть запрещена.
+
+        Это та же секция `llm` с локальным адресом (guardrail #2): конвейер и адаптер не знают,
+        что модель своя, — разница только в том, что фабрика сначала поднимает сервер."""
+        local = self.local_llm
+        if local.model is None:
+            raise ValueError(
+                "для --local нужна модель: SUMMURAZE_LOCAL_LLM_MODEL=/путь/к/модели.gguf "
+                "(какую — см. docs/BENCHMARKS.md, «Саммаризация»)"
+            )
+        if not local.model.is_file():
+            raise ValueError(f"нет файла модели: {local.model} (SUMMURAZE_LOCAL_LLM_MODEL)")
+        llm = LLMSettings(
+            provider="openai-compat",
+            # Порт выберет фабрика при запуске сервера; адрес здесь — чтобы проверки «локально
+            # ли» видели правду до запуска.
+            base_url="http://127.0.0.1/v1",
+            model=local.model.stem,
+            api_key=SecretStr(""),
+            proxy_url=None,
+            openrouter_quantizations=[],
+            context=local.context,
+            single_pass_max=self.llm.single_pass_max,
+            server=local.model_copy(
+                update={"slot_dir": local.slot_dir or self.paths.artifacts_dir / "llama-slots"}
+            ),
+        )
+        return self.model_copy(update={"llm": llm}).restricted()
+
+
+def local_only_conflict(llm: LLMSettings) -> str:
+    return (
+        f"включён --local-only (SUMMURAZE_LOCAL_ONLY), а саммари уходит наружу: {llm.base_url}. "
+        "Транскрипт целиком уехал бы в сеть. Либо локальный сервер "
+        "(SUMMURAZE_LLM_BASE_URL=http://127.0.0.1:8080/v1), либо без --local-only."
+    )
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Настройки процесса. Кэшируются: окружение за время прогона не меняется.
+
+    В тестах сбрасывается через `get_settings.cache_clear()`.
+    """
+    return Settings()
